@@ -1767,10 +1767,10 @@ draw_index_line(IAttrs, Panel, Line, _LineNr, IsCursor, !IO) :-
 
     (
         Selected = selected,
-        mattr_draw(Panel, unless(IsCursor, Attrs ^ selected), "*", !IO)
+        mattr_draw(Panel, unless(IsCursor, Attrs ^ selected), "✓ ", !IO)
     ;
         Selected = not_selected,
-        draw(Panel, " ", !IO)
+        draw(Panel, "  ", !IO)
     ),
     mattr(Panel, unless(IsCursor, Attrs ^ standard_tag), !IO),
 
