@@ -29,12 +29,17 @@
     --->    flagged
     ;       unflagged.
 
+:- type inboxed
+    --->    inboxed
+    ;       not_inboxed.
+
 :- type standard_tags
     --->    standard_tags(
                 unread :: unread,
                 replied :: replied,
                 deleted :: deleted,
-                flagged :: flagged
+                flagged :: flagged,
+                inboxed :: inboxed
             ).
 
 :- type tag_delta
@@ -88,11 +93,14 @@ nondisplay_tag(tag("replied")).
 nondisplay_tag(tag("sent")).
 nondisplay_tag(tag("signed")).
 nondisplay_tag(tag("unread")).
+nondisplay_tag(tag("important")).
+nondisplay_tag(tag("inbox")).
 
 %-----------------------------------------------------------------------------%
 
 get_standard_tags(Tags, StdTags, DisplayTagsWidth) :-
-    StdTags0 = standard_tags(read, not_replied, not_deleted, unflagged),
+    StdTags0 = standard_tags(read, not_replied, not_deleted, unflagged,
+        not_inboxed),
     set.fold2(get_standard_tags_2, Tags, StdTags0, StdTags,
         0, DisplayTagsWidth).
 
@@ -108,6 +116,8 @@ get_standard_tags_2(Tag, !StdTags, !DisplayTagsWidth) :-
         !StdTags ^ deleted := deleted
     ; Tag = tag("flagged") ->
         !StdTags ^ flagged := flagged
+    ; Tag = tag("inbox") ->
+        !StdTags ^ inboxed := inboxed
     ; display_tag(Tag) ->
         Tag = tag(TagName),
         % Add one for separator.

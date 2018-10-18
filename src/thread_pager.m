@@ -2989,7 +2989,7 @@ draw_thread_line(TAttrs, Panel, Line, _LineNr, IsCursor, !IO) :-
     ),
     mattr(Panel, unless(IsCursor, Attrs ^ standard_tag), !IO),
 
-    StdTags = standard_tags(Unread, Replied, Deleted, Flagged),
+    StdTags = standard_tags(Unread, Replied, Deleted, Flagged, Inboxed),
     (
         Unread = unread,
         draw(Panel, "n", !IO)
@@ -3009,6 +3009,13 @@ draw_thread_line(TAttrs, Panel, Line, _LineNr, IsCursor, !IO) :-
         draw(Panel, "d", !IO)
     ;
         Deleted = not_deleted,
+        draw(Panel, " ", !IO)
+    ),
+    (
+        Inboxed = inboxed,
+        draw(Panel, "i", !IO)
+    ;
+        Inboxed = not_inboxed,
         draw(Panel, " ", !IO)
     ),
     (
