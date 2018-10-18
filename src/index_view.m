@@ -1774,7 +1774,7 @@ draw_index_line(IAttrs, Panel, Line, _LineNr, IsCursor, !IO) :-
     ),
     mattr(Panel, unless(IsCursor, Attrs ^ standard_tag), !IO),
 
-    StdTags = standard_tags(Unread, Replied, Deleted, Flagged),
+    StdTags = standard_tags(Unread, Replied, Deleted, Flagged, Inboxed),
     (
         Unread = unread,
         Base = bold,
@@ -1796,6 +1796,13 @@ draw_index_line(IAttrs, Panel, Line, _LineNr, IsCursor, !IO) :-
         draw(Panel, "✗", !IO)
     ;
         Deleted = not_deleted,
+        draw(Panel, " ", !IO)
+    ),
+    (
+        Inboxed = inboxed,
+        draw(Panel, "i", !IO)
+    ;
+        Inboxed = not_inboxed,
         draw(Panel, " ", !IO)
     ),
     (
