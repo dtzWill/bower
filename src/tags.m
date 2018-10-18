@@ -95,6 +95,15 @@ nondisplay_tag(tag("signed")).
 nondisplay_tag(tag("unread")).
 nondisplay_tag(tag("important")).
 nondisplay_tag(tag("inbox")).
+nondisplay_tag(tag("old/Research")).
+nondisplay_tag(tag("llvm dev lists/llvm-commits")).
+nondisplay_tag(tag("llvm dev lists/clang-commits")).
+nondisplay_tag(tag("llvm dev lists/clang-dev")).
+nondisplay_tag(tag("llvm dev lists/clang-users")).
+nondisplay_tag(tag("llvm dev lists/llvm-dev")).
+nondisplay_tag(tag("llvm dev lists/llvm-bugs")).
+nondisplay_tag(tag("_my projects/ALLVM")).
+nondisplay_tag(tag("_my projects/ALLVM/commits")).
 
 %-----------------------------------------------------------------------------%
 
