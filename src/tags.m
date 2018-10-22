@@ -95,6 +95,7 @@ nondisplay_tag(tag("signed")).
 nondisplay_tag(tag("unread")).
 nondisplay_tag(tag("important")).
 nondisplay_tag(tag("inbox")).
+nondisplay_tag(tag("lists")).
 nondisplay_tag(tag("old/Research")).
 nondisplay_tag(tag("llvm dev lists/llvm-commits")).
 nondisplay_tag(tag("llvm dev lists/clang-commits")).
@@ -130,7 +131,9 @@ get_standard_tags_2(Tag, !StdTags, !DisplayTagsWidth) :-
     ; display_tag(Tag) ->
         Tag = tag(TagName),
         % Add one for separator.
-        !:DisplayTagsWidth = !.DisplayTagsWidth + string_wcwidth(TagName) + 1
+        !:DisplayTagsWidth = !.DisplayTagsWidth +
+            string_wcwidth(string.remove_prefix_if_present("lists/",TagName)) +
+            1
     ;
         true
     ).
