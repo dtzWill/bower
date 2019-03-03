@@ -3090,9 +3090,8 @@ draw_thread_line(TAttrs, Panel, Line, _LineNr, IsCursor, !IO) :-
 
 draw_display_tag(Panel, Tag, !IO) :-
     ( display_tag(Tag) ->
-        Tag = tag(TagName),
-        TagName2 = string.remove_prefix_if_present("lists/", TagName),
-        draw2(Panel, " ", TagName2, !IO)
+        display_tag_string(Tag, S),
+        draw2(Panel, " ", S, !IO)
     ;
         true
     ).

@@ -59,6 +59,8 @@
 :- pred validate_tag_deltas(list(string)::in, list(tag_delta)::out,
     set(tag)::out, set(tag)::out) is semidet.
 
+:- pred display_tag_string(tag::in, string::out) is det.
+
 %-----------------------------------------------------------------------------%
 %-----------------------------------------------------------------------------%
 
@@ -114,6 +116,16 @@ get_standard_tags(Tags, StdTags, DisplayTagsWidth) :-
     set.fold2(get_standard_tags_2, Tags, StdTags0, StdTags,
         0, DisplayTagsWidth).
 
+display_tag_string(Tag, S) :-
+  ( display_tag(Tag) ->
+    Tag = tag(OrigTagName),
+    T2 = string.remove_prefix_if_present("lists/", OrigTagName),
+    S = T2
+  ;
+    % TODO: make this type error instead
+    S = ""
+  ).
+
 :- pred get_standard_tags_2(tag::in, standard_tags::in, standard_tags::out,
     int::in, int::out) is det.
 
@@ -129,11 +141,10 @@ get_standard_tags_2(Tag, !StdTags, !DisplayTagsWidth) :-
     ; Tag = tag("inbox") ->
         !StdTags ^ inboxed := inboxed
     ; display_tag(Tag) ->
-        Tag = tag(TagName),
+        display_tag_string(Tag, S),
         % Add one for separator.
         !:DisplayTagsWidth = !.DisplayTagsWidth +
-            string_wcwidth(string.remove_prefix_if_present("lists/",TagName)) +
-            1
+            string_wcwidth(S) + 1
     ;
         true
     ).
