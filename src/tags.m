@@ -119,8 +119,11 @@ get_standard_tags(Tags, StdTags, DisplayTagsWidth) :-
 display_tag_string(Tag, S) :-
   ( display_tag(Tag) ->
     Tag = tag(OrigTagName),
-    T2 = string.remove_prefix_if_present("lists/", OrigTagName),
-    S = T2
+    T = string.remove_prefix_if_present("lists/", OrigTagName),
+    S =
+    ( T = "calendar" -> "📅"
+    ; T
+    )
   ;
     % TODO: make this type error instead
     S = ""
