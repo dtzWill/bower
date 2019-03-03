@@ -123,7 +123,7 @@ display_tag_string(Tag, S) :-
     T2 = string.replace_all(T1, "github::", "🐙"),
     T3 = string.replace_all(T2, "freebsd", "😈"),
     T4 = string.replace_all(T3, "::interest", "::👀"),
-    T5 = string.replace_all(T4, "::", "﹕"),
+    T5 = string.replace_all(T4, "::", "═"),
     T = T5,
     S =
     ( T = "calendar" -> "📅"
