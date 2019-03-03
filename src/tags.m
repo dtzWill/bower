@@ -132,6 +132,9 @@ display_tag_string(Tag, S) :-
     ; T = "preinbox" -> "⎆"
     ; T = "attachment" -> "📎"
     ; T = "interest" -> "👀"
+    ; T = "priority" -> "❗"
+    ; T = "snooze" -> "💤"
+    ; T = "done" -> "✔"
     ; T
     )
   ;
