@@ -119,9 +119,19 @@ get_standard_tags(Tags, StdTags, DisplayTagsWidth) :-
 display_tag_string(Tag, S) :-
   ( display_tag(Tag) ->
     Tag = tag(OrigTagName),
-    T = string.remove_prefix_if_present("lists/", OrigTagName),
+    T1 = string.remove_prefix_if_present("lists/", OrigTagName),
+    T2 = string.replace_all(T1, "github::", "🐙"),
+    T3 = string.replace_all(T2, "freebsd", "😈"),
+    T4 = string.replace_all(T3, "interest::", "👀"),
+    T = T4,
     S =
     ( T = "calendar" -> "📅"
+    ; T = "grad" -> "🎓"
+    ; T = "positive" -> "👍"
+    ; T = "github" -> "🐙"
+    ; T = "preinbox" -> "⎆"
+    ; T = "attachment" -> "📎"
+    ; T = "interest" -> "👀"
     ; T
     )
   ;
