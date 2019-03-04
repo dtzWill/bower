@@ -119,12 +119,14 @@ get_standard_tags(Tags, StdTags, DisplayTagsWidth) :-
 display_tag_string(Tag, S) :-
   ( display_tag(Tag) ->
     Tag = tag(OrigTagName),
+    % XXX: This T1/T2 is bad and I feel bad
     T1 = string.remove_prefix_if_present("lists/", OrigTagName),
-    T2 = string.replace_all(T1, "github::", "🄖 "),
-    T3 = string.replace_all(T2, "freebsd", "😈"),
-    T4 = string.replace_all(T3, "::interest", "⋯👀"),
-    T5 = string.replace_all(T4, "::", "⋯"), % 𑀈
-    T = T5,
+    T2 = string.replace_all(T1, "github::", "🄖 ⋯"),
+    T3 = string.replace_all(T2, "allvm::", "🄐 ⋯"),
+    T4 = string.replace_all(T3, "freebsd", "😈"),
+    T5 = string.replace_all(T4, "::interest", "⋯⌘"),
+    T6 = string.replace_all(T5, "::", "⋯"), % 𑀈
+    T = T6,
     S =
     ( T = "calendar" -> "📅"
     ; T = "grad" -> "🎓"
@@ -132,10 +134,13 @@ display_tag_string(Tag, S) :-
     ; T = "github" -> "🄖 "
     ; T = "preinbox" -> "⎆"
     ; T = "attachment" -> "📎"
-    ; T = "interest" -> "👀"
+    ; T = "interest" -> "⌘"
     ; T = "priority" -> "❗"
     ; T = "snooze" -> "💤"
     ; T = "done" -> "✔"
+    ; T = "sent" -> "📨"
+    ; T = "Finance" -> "💲"
+    ; T = "info" -> "ⓘ"
     ; T
     )
   ;
