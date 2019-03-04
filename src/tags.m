@@ -122,7 +122,7 @@ display_tag_string(Tag, S) :-
     % XXX: This T1/T2 is bad and I feel bad
     T1 = string.remove_prefix_if_present("lists/", OrigTagName),
     T2 = string.replace_all(T1, "github::", "🄖 ⋯"),
-    T3 = string.replace_all(T2, "allvm::", "🄐 ⋯"),
+    T3 = string.replace_all(T2, "ALLVM::", "🄐 ⋯"),
     T4 = string.replace_all(T3, "freebsd", "😈"),
     T5 = string.replace_all(T4, "::interest", "⋯⌘ "),
     T6 = string.replace_all(T5, "::", "⋯"), % 𑀈
@@ -132,6 +132,7 @@ display_tag_string(Tag, S) :-
     ; T = "grad" -> "🎓"
     ; T = "positive" -> "👍"
     ; T = "github" -> "🄖 "
+    ; T = "ALLVM" -> "🄐 "
     ; T = "preinbox" -> "⎆"
     ; T = "attachment" -> "📎"
     ; T = "interest" -> "⌘ "
