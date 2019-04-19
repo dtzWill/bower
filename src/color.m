@@ -54,8 +54,7 @@
 :- type index_attrs
     --->    index_attrs(
                 i_generic       :: generic_attrs,
-                i_count         :: attr,
-                i_counttotal    :: attr
+                i_count         :: attr
             ).
 
 :- type thread_attrs
@@ -186,8 +185,7 @@ make_index_attrs(Config, GenericAttrs0, Attrs) :-
     Def = default_index_attrs(GenericAttrs),
     Sections = [Section, generic_section],
     cfg(Config, Def ^ i_count, Sections, "count", Count),
-    cfg(Config, Def ^ i_counttotal, Sections, "counttotal", CountTotal),
-    Attrs = index_attrs(GenericAttrs, Count, CountTotal).
+    Attrs = index_attrs(GenericAttrs, Count).
 
 :- pred make_thread_attrs(config::in, generic_attrs::in, status_attrs::in,
     thread_attrs::out) is det.
@@ -371,8 +369,7 @@ default_pager_attrs(GenericAttrs) =
 default_index_attrs(GenericAttrs0) =
     index_attrs(
         GenericAttrs0,
-        normal(green),
-        bold(black)
+        normal(green)
     ).
 
 :- func default_thread_attrs(generic_attrs, status_attrs) = thread_attrs.
