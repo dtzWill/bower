@@ -1908,6 +1908,12 @@ get_author_width(Cols, AuthorWidth) :-
         AuthorWidth = min(Rem, 20)
     ).
 
+:- pred not_rbracket(char::in) is semidet.
+
+not_rbracket(C) :-
+  C \= (']').
+
+
 :- pred filter_subject(string::in, show_square_brackets::in, string::out) is det.
 
 filter_subject(Subj, Show, O) :-
@@ -1915,10 +1921,9 @@ filter_subject(Subj, Show, O) :-
     O = Subj% no change
   ; Show = hide_square_brackets,
    ( string.prefix(Subj, "["),
-     string.contains_char(Subj, ']'),
+     string.contains_char(Subj, ']') ->
      string.remove_prefix("[", Subj, After),
-     numkeep = string.suffix_len(is_not_rbracket, After),
-     string.right(After, numkeep, Keep),
+     string.right(After, string.suffix_length(not_rbracket, After), Keep),
      O = Keep
      ;
      O = Subj
@@ -1932,7 +1937,7 @@ filter_subject(Subj, Show, O) :-
 draw_index_line(IAttrs, AuthorWidth, ShowBrackets, Panel, Line, _LineNr, IsCursor, !IO) :-
     Line = index_line(_Id, Selected, Date, Authors, OrigSubject, Tags, StdTags,
         NonstdTagsWidth, Matched, Total),
-    Subject = filter_subject(OrigSubject, ShowBrackets),
+    filter_subject(OrigSubject, ShowBrackets, Subject),
     Attrs = IAttrs ^ i_generic,
     (
         IsCursor = yes,
