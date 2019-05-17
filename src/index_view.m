@@ -73,6 +73,7 @@
                 i_internal_search   :: maybe(string),
                 i_internal_search_dir :: search_direction,
                 i_show_authors      :: show_authors,
+                i_show_square_brackets :: show_square_brackets,
                 i_common_history    :: common_history
             ).
 
@@ -97,6 +98,10 @@
 :- type show_authors
     --->    show_authors
     ;       hide_authors.
+
+:- type show_square_brackets
+    --->    show_square_brackets
+    ;       hide_square_brackets.
 
 :- type binding
     --->    scroll_down
@@ -129,6 +134,7 @@
     ;       bulk_tag(keep_selection)
     ;       pipe_thread_id
     ;       toggle_show_authors
+    ;       toggle_show_square_brackets
     ;       quit.
 
 :- type action
@@ -212,7 +218,7 @@ open_index(Config, NotmuchConfig, Crypto, Screen, SearchString,
     MaybeSearch = no,
     IndexInfo = index_info(Config, Crypto, Scrollable, SearchString,
         SearchTokens, SearchTime, NextPollTime, PollCount, MaybeSearch,
-        dir_forward, show_authors, !.CommonHistory),
+        dir_forward, show_authors, show_square_brackets, !.CommonHistory),
     index_loop(Screen, redraw, IndexInfo, !IO).
 
 :- pred search_terms_with_progress(prog_config::in, screen::in,
@@ -650,6 +656,10 @@ index_view_input(Screen, KeyCode, MessageUpdate, Action, !IndexInfo) :-
             toggle_show_authors(MessageUpdate, !IndexInfo),
             Action = continue
         ;
+            Binding = toggle_show_square_brackets,
+            toggle_show_square_brackets(MessageUpdate, !IndexInfo),
+            Action = continue
+        ;
             Binding = quit,
             MessageUpdate = no_change,
             Action = quit
@@ -722,6 +732,7 @@ key_binding_char('''', bulk_tag(clear_selection)).
 key_binding_char('"', bulk_tag(keep_selection)).
 key_binding_char('|', pipe_thread_id).
 key_binding_char('z', toggle_show_authors).
+key_binding_char('}', toggle_show_square_brackets).
 key_binding_char('q', quit).
 key_binding_char('z', toggle_author).
 
@@ -1625,6 +1636,26 @@ toggle_show_authors(MessageUpdate, !Info) :-
 
 %-----------------------------------------------------------------------------%
 
+:- pred toggle_show_square_brackets(message_update::out,
+    index_info::in, index_info::out) is det.
+
+toggle_show_square_brackets(MessageUpdate, !Info) :-
+    ShowBrackets0 = !.Info ^ i_show_square_brackets,
+    (
+        ShowBrackets0 = show_square_brackets,
+        MessageUpdate = set_info("Hiding brackets in subject."),
+        ShowBrackets = hide_square_brackets
+    ;
+        ShowBrackets0 = hide_square_brackets,
+        MessageUpdate = set_info("Showing brackets in subject."),
+        ShowBrackets = show_square_brackets
+    ),
+    !Info ^ i_show_square_brackets := ShowBrackets.
+
+%-----------------------------------------------------------------------------%
+
+%-----------------------------------------------------------------------------%
+
 :- pred refresh_all(screen::in, verbosity::in, index_info::in, index_info::out,
     io::di, io::uo) is det.
 
@@ -1865,7 +1896,7 @@ draw_index_view(Screen, Info, !IO) :-
     ),
     get_main_panels(Screen, MainPanels),
     Scrollable = Info ^ i_scrollable,
-    scrollable.draw(draw_index_line(Attrs, AuthorWidth), MainPanels,
+    scrollable.draw(draw_index_line(Attrs, AuthorWidth, Info ^ i_show_square_brackets), MainPanels,
         Scrollable, !IO).
 
 :- pred get_author_width(int::in, authorvisible::in, int::out) is det.
@@ -1878,12 +1909,31 @@ get_author_width(Cols, AuthorVisible, AuthorWidth) :-
         AuthorWidth = 0
     ).
 
-:- pred draw_index_line(index_attrs::in, int::in, panel::in,
+:- pred filter_subject(string::in, show_square_brackets::in, string::out) is det.
+
+filter_subject(Subj, Show, O) :-
+  ( Show = show_square_brackets,
+    O = Subj% no change
+  ; Show = hide_square_brackets,
+   ( string.prefix(Subj, "["),
+     string.contains_char(Subj, ']'),
+     string.remove_prefix("[", Subj, After),
+     numkeep = string.suffix_len(is_not_rbracket, After),
+     string.right(After, numkeep, Keep),
+     O = Keep
+     ;
+     O = Subj
+   )
+  )
+ .
+
+:- pred draw_index_line(index_attrs::in, int::in, show_square_brackets::in, panel::in,
     index_line::in, int::in, bool::in, io::di, io::uo) is det.
 
-draw_index_line(IAttrs, AuthorWidth, Panel, Line, _LineNr, IsCursor, !IO) :-
-    Line = index_line(_Id, Selected, Date, Authors, Subject, Tags, StdTags,
+draw_index_line(IAttrs, AuthorWidth, ShowBrackets, Panel, Line, _LineNr, IsCursor, !IO) :-
+    Line = index_line(_Id, Selected, Date, Authors, OrigSubject, Tags, StdTags,
         NonstdTagsWidth, Matched, Total),
+    Subject = filter_subject(OrigSubject, ShowBrackets),
     Attrs = IAttrs ^ i_generic,
     (
         IsCursor = yes,
