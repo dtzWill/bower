@@ -1922,7 +1922,8 @@ filter_subject(Subj, Show, O) :-
   ; Show = hide_square_brackets,
    ( string.prefix(Subj, "["),
      string.contains_char(Subj, ']') ->
-     string.remove_prefix("[", Subj, After),
+     % string.remove_prefix("[", Subj, After),
+     After = string.remove_prefix_if_present("[", Subj),
      string.right(After, string.suffix_length(not_rbracket, After), Keep),
      O = Keep
      ;
