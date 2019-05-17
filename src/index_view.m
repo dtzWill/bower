@@ -734,7 +734,6 @@ key_binding_char('|', pipe_thread_id).
 key_binding_char('z', toggle_show_authors).
 key_binding_char('}', toggle_show_square_brackets).
 key_binding_char('q', quit).
-key_binding_char('z', toggle_author).
 
 :- pred move_cursor(screen::in, int::in, message_update::out,
     index_info::in, index_info::out) is det.
@@ -1899,14 +1898,14 @@ draw_index_view(Screen, Info, !IO) :-
     scrollable.draw(draw_index_line(Attrs, AuthorWidth, Info ^ i_show_square_brackets), MainPanels,
         Scrollable, !IO).
 
-:- pred get_author_width(int::in, authorvisible::in, int::out) is det.
+:- pred get_author_width(int::in, int::out) is det.
 
-get_author_width(Cols, AuthorVisible, AuthorWidth) :-
+get_author_width(Cols, AuthorWidth) :-
     Rem = Cols - 16 - 40,
-    ( AuthorVisible = showing_author, Rem >= 4 ->
-        AuthorWidth = min(Rem, 20)
-    ;
+    ( Rem < 4 ->
         AuthorWidth = 0
+    ;
+        AuthorWidth = min(Rem, 20)
     ).
 
 :- pred filter_subject(string::in, show_square_brackets::in, string::out) is det.
