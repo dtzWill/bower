@@ -3109,10 +3109,10 @@ draw_thread_line(TAttrs, Screen, Panel, Line, _LineNr, IsCursor, !IO) :-
     ),
     (
         Inboxed = inboxed,
-        draw(Panel, "i", !IO)
+        draw(Screen, Panel, "i", !IO)
     ;
         Inboxed = not_inboxed,
-        draw(Panel, " ", !IO)
+        draw(Screen, Panel, " ", !IO)
     ),
     (
         Flagged = flagged,
