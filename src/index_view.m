@@ -1972,10 +1972,10 @@ draw_index_line(IAttrs, AuthorWidth, ShowBrackets, Screen, Panel, Line, _LineNr,
     ),
     (
         Inboxed = inboxed,
-        draw(Panel, "i", !IO)
+        draw(Screen, Panel, "i", !IO)
     ;
         Inboxed = not_inboxed,
-        draw(Panel, " ", !IO)
+        draw(Screen, Panel, " ", !IO)
     ),
     (
         Flagged = flagged,
