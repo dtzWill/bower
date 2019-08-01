@@ -1924,7 +1924,7 @@ filter_subject(Subj, Show, O) :-
 
 draw_index_line(IAttrs, AuthorWidth, ShowBrackets, Screen, Panel, Line, _LineNr, IsCursor,
         !IO) :-
-    Line = index_line(_Id, Selected, Date, Authors, Subject, Tags, StdTags,
+    Line = index_line(_Id, Selected, Date, Authors, OrigSubject, Tags, StdTags,
         NonstdTagsWidth, Matched, Total),
     filter_subject(OrigSubject, ShowBrackets, Subject),
     Attrs = IAttrs ^ i_generic,
