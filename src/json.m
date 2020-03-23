@@ -36,7 +36,6 @@
 :- import_module char.
 :- import_module float.
 :- import_module int.
-:- import_module integer.
 :- import_module maybe.
 :- import_module string.
 :- import_module unit.
@@ -200,7 +199,10 @@ number(Src, Number, !PS) :-
         Number = float(Float)
     else if string.to_int(NumberString, Int) then
         Number = int(Int)
-    else if integer.from_string(NumberString, Integer) then
+    else if
+        % integer.from_string/2 was added after 14.01.
+        integer.from_string(NumberString) = Integer
+    then
         Number = integer(Integer)
     else
         fail
