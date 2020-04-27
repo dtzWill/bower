@@ -68,6 +68,7 @@
 :- import_module quote_arg.
 :- import_module recall.
 :- import_module resend.
+:- import_module sanitise.
 :- import_module scrollable.
 :- import_module shell_word.
 :- import_module string_util.
@@ -113,7 +114,7 @@
     --->    thread_line(
                 tp_message      :: message,
                 tp_parent       :: maybe(message_id),
-                tp_clean_from   :: string,
+                tp_clean_from   :: presentable_string,
                 tp_prev_tags    :: set(tag),
                 tp_curr_tags    :: set(tag),
                 tp_std_tags     :: standard_tags, % cached from tp_curr_tags
@@ -121,7 +122,7 @@
                 tp_selected     :: selected,
                 tp_graphics     :: maybe(list(graphic)),
                 tp_reldate      :: string,
-                tp_subject      :: maybe(header_value)
+                tp_subject      :: maybe(presentable_string)
             ).
 
 :- type selected
@@ -620,7 +621,8 @@ make_thread_line(Nowish, Message, MaybeParentId, MaybeGraphics,
         ->
             MaybeSubject = no
         ;
-            MaybeSubject = yes(CurSubject)
+            CurSubjectStr = header_value_string(CurSubject),
+            MaybeSubject = yes(make_presentable(CurSubjectStr))
         )
     ;
         MaybeHeaders = no,
@@ -634,7 +636,7 @@ make_thread_line(Nowish, Message, MaybeParentId, MaybeGraphics,
         Tags = set.init
     ),
     get_standard_tags(Tags, StdTags, NonstdTagsWidth),
-    Line = thread_line(Message, MaybeParentId, CleanFrom,
+    Line = thread_line(Message, MaybeParentId, make_presentable(CleanFrom),
         Tags, Tags, StdTags, NonstdTagsWidth,
         not_selected, MaybeGraphics, RelDate, MaybeSubject).
 
@@ -1680,8 +1682,8 @@ bulk_tag(Screen, Done, !Info, !IO) :-
     ( any_selected_line(Lines0) ->
         Prompt = "Action: (d)elete, (u)ndelete, (N) toggle unread, " ++
             "(') mark read, (+/-) change tags",
-        update_message_immed(Screen, set_prompt(Prompt), !IO),
-        get_keycode_blocking(KeyCode, !IO),
+        get_keycode_blocking_handle_resize(Screen, set_prompt(Prompt), KeyCode,
+            !Info, !IO),
         ( KeyCode = char('-') ->
             Config = !.Info ^ tp_config,
             init_bulk_tag_completion(Config, Lines0, Completion),
@@ -2092,7 +2094,7 @@ prompt_open_part(Screen, Part, MaybeNextKey, !Info, !IO) :-
         !Info ^ tp_common_history ^ ch_open_part_history := History,
         Config = !.Info ^ tp_config,
         do_open_part(Config, Screen, Part, Command1, MessageUpdate,
-            MaybeNextKey, !IO)
+            MaybeNextKey, !Info, !IO)
     ;
         MessageUpdate = clear_message,
         MaybeNextKey = no
@@ -2100,11 +2102,12 @@ prompt_open_part(Screen, Part, MaybeNextKey, !Info, !IO) :-
     update_message(Screen, MessageUpdate, !IO).
 
 :- pred do_open_part(prog_config::in, screen::in, part::in, string::in,
-    message_update::out, maybe(keycode)::out, io::di, io::uo) is det.
+    message_update::out, maybe(keycode)::out,
+    thread_pager_info::in, thread_pager_info::out, io::di, io::uo) is det.
 
 do_open_part(Config, Screen, Part, Command, MessageUpdate, MaybeNextKey,
-        !IO) :-
-    promise_equivalent_solutions [MessageUpdate, MaybeNextKey, !:IO] (
+        !Info, !IO) :-
+    promise_equivalent_solutions [MessageUpdate, MaybeNextKey, !:Info, !:IO] (
         shell_word.split(Command, ParseResult),
         (
             ParseResult = ok([]),
@@ -2115,7 +2118,7 @@ do_open_part(Config, Screen, Part, Command, MessageUpdate, MaybeNextKey,
             ParseResult = ok(CommandWords),
             CommandWords = [_ | _],
             do_open_part_2(Config, Screen, Part, CommandWords, MessageUpdate,
-                MaybeNextKey, !IO)
+                MaybeNextKey, !Info, !IO)
         ;
             (
                 ParseResult = error(yes(Error), _Line, Column),
@@ -2133,10 +2136,10 @@ do_open_part(Config, Screen, Part, Command, MessageUpdate, MaybeNextKey,
 
 :- pred do_open_part_2(prog_config::in, screen::in, part::in,
     list(word)::in(non_empty_list), message_update::out, maybe(keycode)::out,
-    io::di, io::uo) is det.
+    thread_pager_info::in, thread_pager_info::out, io::di, io::uo) is det.
 
 do_open_part_2(Config, Screen, Part, CommandWords, MessageUpdate, MaybeNextKey,
-        !IO) :-
+        !Info, !IO) :-
     Part = part(MessageId, MaybePartId, _ContentType, _MaybeContentDisposition,
         _Content, MaybePartFileName, _MaybeContentLength, _MaybeCTE,
         IsDecrypted),
@@ -2157,10 +2160,9 @@ do_open_part_2(Config, Screen, Part, CommandWords, MessageUpdate, MaybeNextKey,
             call_open_command(Screen, CommandWords, FileName, MaybeError, !IO),
             (
                 MaybeError = ok,
-                ContMessage = set_info(
-                    "Press any key to continue (deletes temporary file)"),
-                update_message_immed(Screen, ContMessage, !IO),
-                get_keycode_blocking(Key, !IO),
+                Message = "Press any key to continue (deletes temporary file)",
+                get_keycode_blocking_handle_resize(Screen, set_info(Message),
+                    Key, !Info, !IO),
                 MaybeNextKey = yes(Key),
                 MessageUpdate = clear_message
             ;
@@ -2852,8 +2854,8 @@ pipe_ids(Screen, !Info, !IO) :-
         HaveSelectedMessages = yes,
         PromptWhat = PromptWhat0 ++ ", (m) selected message IDs"
     ),
-    update_message_immed(Screen, set_prompt(PromptWhat), !IO),
-    get_keycode_blocking(KeyCode, !IO),
+    get_keycode_blocking_handle_resize(Screen, set_prompt(PromptWhat), KeyCode,
+        !Info, !IO),
     ( KeyCode = char('t') ->
         PromptCommand = "Pipe thread ID: ",
         ThreadId = !.Info ^ tp_thread_id,
@@ -3028,6 +3030,25 @@ next_poll_time(Config, Time) = NextPollTime :-
 
 %-----------------------------------------------------------------------------%
 
+:- pred get_keycode_blocking_handle_resize(screen::in, message_update::in,
+    keycode::out, thread_pager_info::in, thread_pager_info::out,
+    io::di, io::uo) is det.
+
+get_keycode_blocking_handle_resize(Screen, Message, Key, !Info, !IO) :-
+    update_message_immed(Screen, Message, !IO),
+    get_keycode_blocking(Key0, !IO),
+    ( Key0 = code(curs.key_resize) ->
+        recreate_screen_for_resize(Screen, !IO),
+        resize_thread_pager(Screen, !Info, !IO),
+        draw_thread_pager(Screen, !.Info, !IO),
+        update_panels(Screen, !IO),
+        get_keycode_blocking_handle_resize(Screen, Message, Key, !Info, !IO)
+    ;
+        Key = Key0
+    ).
+
+%-----------------------------------------------------------------------------%
+
 :- pred draw_thread_pager(screen::in, thread_pager_info::in, io::di, io::uo)
     is det.
 
@@ -3064,8 +3085,9 @@ draw_sep(Screen, MaybeSepPanel, Attrs, Cols, !IO) :-
     thread_line::in, int::in, bool::in, io::di, io::uo) is det.
 
 draw_thread_line(TAttrs, Screen, Panel, Line, _LineNr, IsCursor, !IO) :-
-    Line = thread_line(Message, _ParentId, From, _PrevTags, CurrTags, StdTags,
-        NonstdTagsWidth, Selected, MaybeGraphics, RelDate, MaybeSubject),
+    Line = thread_line(Message, _ParentId, presentable_string(From),
+        _PrevTags, CurrTags, StdTags, NonstdTagsWidth,
+        Selected, MaybeGraphics, RelDate, MaybeSubject),
     Attrs = TAttrs ^ t_generic,
     (
         IsCursor = yes,
@@ -3150,10 +3172,10 @@ draw_thread_line(TAttrs, Screen, Panel, Line, _LineNr, IsCursor, !IO) :-
         unless(IsCursor, curs.(Attrs ^ author + Highlight)),
         From, !IO),
     (
-        MaybeSubject = yes(Subject),
+        MaybeSubject = yes(presentable_string(Subject)),
         draw(Screen, Panel, ". ", !IO),
         mattr_draw(Screen, Panel, unless(IsCursor, Attrs ^ subject),
-            header_value_string(Subject), !IO)
+            Subject, !IO)
     ;
         MaybeSubject = no
     ),

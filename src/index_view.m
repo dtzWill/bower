@@ -45,6 +45,7 @@
 :- import_module pipe_to.
 :- import_module poll_notify.
 :- import_module recall.
+:- import_module sanitise.
 :- import_module scrollable.
 :- import_module search_term.
 :- import_module signal.
@@ -82,8 +83,8 @@
                 i_id        :: thread_id,
                 i_selected  :: selected,
                 i_date      :: string,
-                i_authors   :: string,
-                i_subject   :: string,
+                i_authors   :: presentable_string,
+                i_subject   :: presentable_string,
                 i_tags      :: set(tag),
                 i_std_tags  :: standard_tags, % cached from i_tags
                 i_nonstd_tags_width :: int,   % cached from i_nonstd_tags_width
@@ -301,8 +302,9 @@ thread_to_index_line(Nowish, Thread, Line, !IO) :-
     Shorter = yes,
     make_reldate(Nowish, TM, Shorter, Date),
     get_standard_tags(Tags, StdTags, DisplayTagsWidth),
-    Line = index_line(Id, not_selected, Date, Authors, Subject, Tags, StdTags,
-        DisplayTagsWidth, Matched, Total).
+    Line = index_line(Id, not_selected, Date, make_presentable(Authors),
+        make_presentable(Subject), Tags, StdTags, DisplayTagsWidth,
+        Matched, Total).
 
 :- func default_max_threads = int.
 
@@ -321,7 +323,6 @@ index_loop(Screen, OnEntry, !.IndexInfo, !IO) :-
     (
         OnEntry = redraw,
         draw_index_view(Screen, !.IndexInfo, !IO),
-        draw_index_bar(Screen, !.IndexInfo, !IO),
         update_panels(Screen, !IO)
     ;
         OnEntry = no_draw
@@ -1048,8 +1049,9 @@ skip_to_internal_search_2(Search, SearchDir, Start, WrapStart, WrapMessage,
 :- pred line_matches_internal_search(string::in, index_line::in) is semidet.
 
 line_matches_internal_search(Search, Line) :-
-    Line = index_line(_Id, _Selected, _Date, Authors, Subject, Tags, _StdTags,
-        _TagsWidth, _Matched, _Total),
+    Line = index_line(_Id, _Selected, _Date, presentable_string(Authors),
+        presentable_string(Subject), Tags, _StdTags, _TagsWidth,
+        _Matched, _Total),
     (
         strcase_str(Authors, Search)
     ;
@@ -1303,8 +1305,8 @@ bulk_tag(Screen, Done, !Info, !IO) :-
     ( any_selected_line(Lines0) ->
         Prompt = "Action: (d)elete, (u)ndelete, (N) toggle unread, " ++
             "(') mark read, (+/-) change tags",
-        update_message_immed(Screen, set_prompt(Prompt), !IO),
-        get_keycode_blocking(KeyCode, !IO),
+        get_keycode_blocking_handle_resize(Screen, set_prompt(Prompt), KeyCode,
+            !Info, !IO),
         ( KeyCode = char('-') ->
             Config = !.Info ^ i_config,
             init_bulk_tag_completion(Config, Lines0, Completion),
@@ -1866,6 +1868,24 @@ next_poll_time(Config, Time) = NextPollTime :-
 
 %-----------------------------------------------------------------------------%
 
+:- pred get_keycode_blocking_handle_resize(screen::in, message_update::in,
+    keycode::out, index_info::in, index_info::out, io::di, io::uo) is det.
+
+get_keycode_blocking_handle_resize(Screen, Message, Key, !Info, !IO) :-
+    update_message_immed(Screen, Message, !IO),
+    get_keycode_blocking(Key0, !IO),
+    ( Key0 = code(curs.key_resize) ->
+        recreate_screen_for_resize(Screen, !IO),
+        recreate_index_view(Screen, !Info, !IO),
+        draw_index_view(Screen, !.Info, !IO),
+        update_panels(Screen, !IO),
+        get_keycode_blocking_handle_resize(Screen, Message, Key, !Info, !IO)
+    ;
+        Key = Key0
+    ).
+
+%-----------------------------------------------------------------------------%
+
 :- pred draw_index_view(screen::in, index_info::in, io::di, io::uo) is det.
 
 draw_index_view(Screen, Info, !IO) :-
@@ -1883,7 +1903,8 @@ draw_index_view(Screen, Info, !IO) :-
     get_main_panels(Screen, MainPanels, !IO),
     Scrollable = Info ^ i_scrollable,
     scrollable.draw(draw_index_line(Attrs, AuthorWidth, Info ^ i_show_square_brackets), Screen, MainPanels,
-        Scrollable, !IO).
+        Scrollable, !IO),
+    draw_index_bar(Screen, Info, !IO).
 
 :- pred get_author_width(int::in, int::out) is det.
 
@@ -1924,9 +1945,11 @@ filter_subject(Subj, Show, O) :-
 
 draw_index_line(IAttrs, AuthorWidth, ShowBrackets, Screen, Panel, Line, _LineNr, IsCursor,
         !IO) :-
-    Line = index_line(_Id, Selected, Date, Authors, OrigSubject, Tags, StdTags,
-        NonstdTagsWidth, Matched, Total),
+    Line = index_line(_Id, Selected, Date, presentable_string(Authors),
+        presentable_string(OrigSubject), Tags, StdTags, NonstdTagsWidth,
+        Matched, Total),
     filter_subject(OrigSubject, ShowBrackets, Subject),
+
     Attrs = IAttrs ^ i_generic,
     (
         IsCursor = yes,
