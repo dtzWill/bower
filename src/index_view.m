@@ -1934,7 +1934,8 @@ filter_subject(Subj, Show, O) :-
      % string.remove_prefix("[", Subj, After),
      After = string.remove_prefix_if_present("[", Subj),
      string.right(After, string.suffix_length(not_rbracket, After), Keep),
-     O = Keep
+     % Leave marker indicating removed portion
+     O = "⁽⁾" ++ Keep
      ;
      O = Subj
    )
