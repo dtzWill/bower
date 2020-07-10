@@ -54,6 +54,8 @@
 :- pred parse_address_count_list(json::in, list(pair(int, string))::out)
     is det.
 
+:- pred parse_reply(json::in, reply_headers::out) is det.
+
 %-----------------------------------------------------------------------------%
 %-----------------------------------------------------------------------------%
 
@@ -69,6 +71,7 @@
 
 :- import_module call_system.
 :- import_module mime_type.
+:- import_module process.
 :- import_module time_util.
 
 :- use_module curs.
@@ -80,7 +83,7 @@ get_notmuch_config(Config, Key, Res, !IO) :-
     make_quoted_command(Notmuch, ["config", "get", Key],
         redirect_input("/dev/null"), no_redirect, redirect_stderr("/dev/null"),
         run_in_foreground, Command),
-    call_system_capture_stdout(Command, no, Res0, !IO),
+    call_system_capture_stdout(Command, environ([]), no, Res0, !IO),
     (
         Res0 = ok(Value0),
         Value = string.strip(Value0),
@@ -119,10 +122,12 @@ call_command_parse_json(Command, SuspendCurs, Parser, Result, !IO) :-
     (
         SuspendCurs = soft_suspend_curses,
         curs.soft_suspend(
-            call_system_capture_stdout(Command, no), CommandResult, !IO)
+            call_system_capture_stdout(Command, environ([]), no),
+            CommandResult, !IO)
     ;
         SuspendCurs = no_suspend_curses,
-        call_system_capture_stdout(Command, no, CommandResult, !IO)
+        call_system_capture_stdout(Command, environ([]), no,
+            CommandResult, !IO)
     ),
     (
         CommandResult = ok(String),
@@ -257,10 +262,10 @@ parse_header(Key, unesc_string(Value), !Headers) :-
         !Headers ^ h_subject := decoded_unstructured(string.replace_all(Value, "\t", " "))
     ; Key = "Reply-To" ->
         !Headers ^ h_replyto := header_value(Value)
-    ; Key = "References" ->
-        !Headers ^ h_references := header_value(Value)
     ; Key = "In-Reply-To" ->
         !Headers ^ h_inreplyto := header_value(Value)
+    ; Key = "References" ->
+        !Headers ^ h_references := header_value(Value)
     ;
         % Some other headers should be decoded_unstructured as well.
         Rest0 = !.Headers ^ h_rest,
@@ -285,6 +290,11 @@ parse_part(MessageId, IsDecrypted0, JSON, Part) :-
         JSON/"content-type" = unesc_string(ContentTypeString)
     ->
         ContentType = make_mime_type(ContentTypeString),
+        ( JSON/"content-charset" = unesc_string(Charset) ->
+            MaybeContentCharset = yes(content_charset(Charset))
+        ;
+            MaybeContentCharset = no
+        ),
         ( JSON/"content-disposition" = unesc_string(Disposition) ->
             MaybeContentDisposition = yes(content_disposition(Disposition))
         ;
@@ -360,13 +370,6 @@ parse_part(MessageId, IsDecrypted0, JSON, Part) :-
             ;
                 MaybeFilename = no
             ),
-            /*
-            ( JSON/"content-charset" = unesc_string(Charset) ->
-                MaybeContentCharset = yes(content_charset(Charset))
-            ;
-                MaybeContentCharset = no
-            ),
-            */
             ( JSON/"content-length" = int(Length) ->
                 MaybeContentLength = yes(content_length(Length))
             ;
@@ -380,7 +383,7 @@ parse_part(MessageId, IsDecrypted0, JSON, Part) :-
             ),
             IsDecrypted = IsDecrypted0
         ),
-        Part = part(MessageId, yes(PartId), ContentType,
+        Part = part(MessageId, yes(PartId), ContentType, MaybeContentCharset,
             MaybeContentDisposition, Content, MaybeFilename,
             MaybeContentLength, MaybeContentTransferEncoding, IsDecrypted)
     ;
@@ -574,6 +577,47 @@ parse_timestamp(Json, Timestamp) :-
         string.to_float(Str, Float),
         Timestamp = timestamp(Float)
     ).
+
+%-----------------------------------------------------------------------------%
+
+parse_reply(Json, Res) :-
+    % We only need the reply headers for now.
+    (
+        Json/"reply-headers" = ReplyHeadersJson,
+        parse_reply_headers(ReplyHeadersJson, ReplyHeaders)
+    ->
+        Res = ReplyHeaders
+    ;
+        notmuch_json_error
+    ).
+
+:- pred parse_reply_headers(json::in, reply_headers::out) is semidet.
+
+parse_reply_headers(Json, ReplyHeaders) :-
+    Json/"Subject" = unesc_string(Subject),
+    Json/"From" = unesc_string(From),
+    ( Json/"To" = ToJson ->
+        ToJson = string(ToEscStr),
+        MaybeTo = yes(unescape(ToEscStr))
+    ;
+        MaybeTo = no
+    ),
+    ( Json/"Cc" = CcJson ->
+        CcJson = string(CcEscStr),
+        MaybeCc = yes(unescape(CcEscStr))
+    ;
+        MaybeCc = no
+    ),
+    ( Json/"Bcc" = BccJson ->
+        BccJson = string(BccEscStr),
+        MaybeBcc = yes(unescape(BccEscStr))
+    ;
+        MaybeBcc = no
+    ),
+    Json/"In-reply-to" = unesc_string(InReplyTo),
+    Json/"References" = unesc_string(References),
+    ReplyHeaders = reply_headers(Subject, From, MaybeTo, MaybeCc, MaybeBcc,
+        InReplyTo, References).
 
 %-----------------------------------------------------------------------------%
 

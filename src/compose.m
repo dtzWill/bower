@@ -29,23 +29,24 @@
     history::in, history::out, io::di, io::uo) is det.
 
 :- pred start_reply(prog_config::in, crypto::in, screen::in,
-    message::in(message), reply_kind::in, screen_transition(sent)::out,
-    io::di, io::uo) is det.
+    message::in(message), reply_kind::in, part_visibility_map::in,
+    screen_transition(sent)::out, io::di, io::uo) is det.
 
 :- pred start_reply_to_message_id(prog_config::in, crypto::in, screen::in,
     message_id::in, reply_kind::in, screen_transition(sent)::out,
     io::di, io::uo) is det.
 
 :- pred start_forward(prog_config::in, crypto::in, screen::in,
-    message::in(message), screen_transition(sent)::out, io::di, io::uo) is det.
+    message::in(message), part_visibility_map::in,
+    screen_transition(sent)::out, io::di, io::uo) is det.
 
 :- type continue_base
     --->    postponed_message
     ;       arbitrary_message.
 
 :- pred continue_from_message(prog_config::in, crypto::in, screen::in,
-    continue_base::in, message::in(message), screen_transition(sent)::out,
-    io::di, io::uo) is det.
+    continue_base::in, message::in(message), part_visibility_map::in,
+    screen_transition(sent)::out, io::di, io::uo) is det.
 
     % Exported for resend.
     %
@@ -82,10 +83,12 @@
 :- import_module maildir.
 :- import_module make_temp.
 :- import_module message_file.
+:- import_module message_template.
 :- import_module mime_type.
 :- import_module notmuch_config.
 :- import_module pager.
 :- import_module path_expand.
+:- import_module process.
 :- import_module quote_arg.
 :- import_module rfc2047.
 :- import_module rfc2047.decoder.
@@ -139,13 +142,17 @@
     --->    old_attachment(part)
     ;       new_attachment(
                 att_type        :: mime_type,
+                att_charset     :: maybe(attachment_charset),
                 att_content     :: attachment_content,
                 att_filename    :: string,
                 att_size        :: int
             ).
 
+:- type attachment_charset
+    --->    attachment_charset(string).
+
 :- type attachment_content
-    --->    text(string)
+    --->    text_content(string)    % UTF-8 compatible content
     ;       base64_encoded(string).
 
 :- type staging_screen_action
@@ -254,8 +261,8 @@ extract_mailto(Input, !:Headers, Body) :-
         !Headers ^ h_cc := header_value(Cc),
         !Headers ^ h_bcc := header_value(Bcc),
         !Headers ^ h_subject := decoded_unstructured(Subject),
-        !Headers ^ h_replyto := header_value(ReplyTo),
-        !Headers ^ h_inreplyto := header_value(InReplyTo)
+        !Headers ^ h_inreplyto := header_value(InReplyTo),
+        !Headers ^ h_replyto := header_value(ReplyTo)
     ).
 
 :- pred lookup_header_field(assoc_list(hfname, hfvalue)::in, string::in,
@@ -285,20 +292,22 @@ expand_aliases(Config, QuoteOpt, Input, Output, !IO) :-
 
 %-----------------------------------------------------------------------------%
 
-start_reply(Config, Crypto, Screen, Message, ReplyKind, Transition, !IO) :-
-    get_notmuch_command(Config, Notmuch),
+start_reply(Config, Crypto, Screen, Message, ReplyKind, PartVisibilityMap,
+        Transition, !IO) :-
     Message ^ m_id = MessageId,
     WasEncrypted = contains(Message ^ m_tags, encrypted_tag),
-    make_quoted_command(Notmuch, [
-        "reply", reply_to_arg(ReplyKind), decrypt_arg(WasEncrypted),
-        "--", message_id_to_search_term(MessageId)
-    ], redirect_input("/dev/null"), no_redirect, Command),
-    % Decryption may invoke pinentry-curses.
-    curs.soft_suspend(
-        call_system_capture_stdout(Command, no), CommandResult, !IO),
+    run_notmuch(Config,
+        [
+            "reply", "--format=json",
+            reply_to_arg(ReplyKind), decrypt_arg(WasEncrypted),
+            "--", message_id_to_search_term(MessageId)
+        ],
+        no_suspend_curses,
+        parse_reply, ResParse, !IO),
     (
-        CommandResult = ok(String),
-        parse_message(String, Headers0, Text),
+        ResParse = ok(ReplyHeaders),
+        prepare_reply(Config, Message, PartVisibilityMap, ReplyHeaders,
+            Headers0, Body, !IO),
         (
             ReplyKind = direct_reply,
             Headers = Headers0
@@ -313,12 +322,11 @@ start_reply(Config, Crypto, Screen, Message, ReplyKind, Transition, !IO) :-
         Attachments = [],
         MaybeOldDraft = no,
         SignInit = no,
-        create_edit_stage(Config, Crypto, Screen, Headers, Text, Attachments,
+        create_edit_stage(Config, Crypto, Screen, Headers, Body, Attachments,
             MaybeOldDraft, WasEncrypted, SignInit, Transition, !IO)
     ;
-        CommandResult = error(Error),
-        string.append_list(["Error running notmuch: ",
-            io.error_message(Error)], Warning),
+        ResParse = error(Error),
+        Warning = "Error parsing notmuch response: " ++ Error,
         Transition = screen_transition(not_sent, set_warning(Warning))
     ).
 
@@ -396,6 +404,7 @@ contains(Set, X) = pred_to_bool(contains(Set, X)).
 
 start_reply_to_message_id(Config, Crypto, Screen, MessageId, ReplyKind,
         Transition, !IO) :-
+    % XXX we could parse the message in notmuch reply --format=json now
     run_notmuch(Config,
         [
             "show", "--format=json", "--part=0", "--",
@@ -407,8 +416,9 @@ start_reply_to_message_id(Config, Crypto, Screen, MessageId, ReplyKind,
         Res = ok(Message),
         (
             Message = message(_, _, _, _, _, _),
-            start_reply(Config, Crypto, Screen, Message, ReplyKind, Transition,
-                !IO)
+            PartVisibilityMap = map.init,
+            start_reply(Config, Crypto, Screen, Message, ReplyKind,
+                PartVisibilityMap, Transition, !IO)
         ;
             Message = excluded_message(_, _, _, _, _),
             Warning = "Excluded message.",
@@ -421,7 +431,8 @@ start_reply_to_message_id(Config, Crypto, Screen, MessageId, ReplyKind,
 
 %-----------------------------------------------------------------------------%
 
-start_forward(Config, Crypto, Screen, Message, Transition, !IO) :-
+start_forward(Config, Crypto, Screen, Message, PartVisibilityMap, Transition,
+        !IO) :-
     get_default_account(Config, MaybeAccount),
     (
         MaybeAccount = yes(Account),
@@ -430,7 +441,8 @@ start_forward(Config, Crypto, Screen, Message, Transition, !IO) :-
         MaybeAccount = no,
         From = ""
     ),
-    prepare_forward_message(Message, From, Headers, Body, AttachmentParts),
+    prepare_forward_message(Config, Message, PartVisibilityMap, From,
+        Headers, Body, AttachmentParts, !IO),
     list.map(to_old_attachment, AttachmentParts, Attachments),
     MaybeOldDraft = no,
     WasEncrypted = contains(Message ^ m_tags, encrypted_tag),
@@ -441,12 +453,19 @@ start_forward(Config, Crypto, Screen, Message, Transition, !IO) :-
 %-----------------------------------------------------------------------------%
 
 continue_from_message(Config, Crypto, Screen, ContinueBase, Message,
-        Transition, !IO) :-
-    MessageId = Message ^ m_id,
-    Headers0 = Message ^ m_headers,
-    Tags0 = Message ^ m_tags,
-    Body0 = Message ^ m_body,
-    select_body_text_and_attachments(Body0, Text, AttachmentParts),
+        PartVisibilityMap, Transition, !IO) :-
+    Message = message(MessageId, _Timestamp, Headers0, Tags0, Body0, _Replies0),
+    select_main_part_and_attachments(PartVisibilityMap, Body0, MaybeMainPart,
+        AttachmentParts),
+    (
+        MaybeMainPart = yes(MainPart),
+        render_part_to_text(Config, PartVisibilityMap, no_quote_marker,
+            MainPart, TextLines, !IO),
+        Text = unlines(TextLines)
+    ;
+        MaybeMainPart = no,
+        Text = ""
+    ),
     list.map(to_old_attachment, AttachmentParts, Attachments),
     WasEncrypted = contains(Tags0, encrypted_tag),
     DraftSign = contains(Tags0, draft_sign_tag),
@@ -460,15 +479,16 @@ continue_from_message(Config, Crypto, Screen, ContinueBase, Message,
         "--", message_id_to_search_term(MessageId)
     ], redirect_input("/dev/null"), no_redirect, Command),
     % Decryption may invoke pinentry-curses.
-    curs.soft_suspend(call_system_capture_stdout(Command, no), CallRes, !IO),
+    curs.soft_suspend(call_system_capture_stdout(Command, environ([]), no),
+        CallRes, !IO),
     (
         CallRes = ok(String),
         parse_message(String, HeadersB, _Body),
         some [!Headers] (
             !:Headers = Headers0,
-            !Headers ^ h_replyto := (HeadersB ^ h_replyto),
-            !Headers ^ h_references := (HeadersB ^ h_references),
-            !Headers ^ h_inreplyto := (HeadersB ^ h_inreplyto),
+            !Headers ^ h_replyto := HeadersB ^ h_replyto,
+            !Headers ^ h_inreplyto := HeadersB ^ h_inreplyto,
+            !Headers ^ h_references := HeadersB ^ h_references,
             Headers = !.Headers
         ),
         (
@@ -1114,20 +1134,50 @@ do_attach_file(FileName, NumRows, MessageUpdate, !AttachInfo, !IO) :-
     attach_info::in, attach_info::out, io::di, io::uo) is det.
 
 do_attach_file_2(FileName, NumRows, MessageUpdate, !AttachInfo, !IO) :-
+    ( dir.basename(FileName, BaseName0) ->
+        BaseName = BaseName0
+    ;
+        BaseName = FileName
+    ),
     detect_mime_type(FileName, ResDetect, !IO),
     (
-        ResDetect = ok(mime_type_with_charset(Type, Charset)),
-        ( dir.basename(FileName, BaseName0) ->
-            BaseName = BaseName0
+        ResDetect = ok(Detected),
+        Detected = mime_type_with_charset(DetectedType, DetectedCharset),
+        ( is_text(DetectedType) ->
+            ( is_utf8_compatible(DetectedCharset) ->
+                Type = DetectedType,
+                MaybeAttachmentCharset =
+                    yes(attachment_charset(DetectedCharset)),
+                Base64Encode = no
+            ;
+                % If we resume a postponed message containing a text/* part
+                % then notmuch show --format=json is supposed to convert the
+                % content to UTF-8 but it does not (always) do so, leaving
+                % broken JSON output and no idea of the correct charset.
+                % As a workaround, force text attachments with non UTF-8
+                % compatible charset to have media type
+                % application/octet-stream instead.
+                % (The user may still manually change the media type thus
+                % exposing the original problem.)
+                Type = application_octet_stream,
+                MaybeAttachmentCharset = no,
+                Base64Encode = yes
+            )
         ;
-            BaseName = FileName
+            Type = DetectedType,
+            MaybeAttachmentCharset = no,
+            Base64Encode = yes
         ),
-        ( acceptable_charset(Charset) ->
-            do_attach_text_file(FileName, BaseName, Type, NumRows,
-                MessageUpdate, !AttachInfo, !IO)
+        (
+            Base64Encode = bool.no,
+            do_attach_file_without_base64_encoding(FileName, BaseName, Type,
+                MaybeAttachmentCharset, NumRows, MessageUpdate,
+                !AttachInfo, !IO)
         ;
+            Base64Encode = bool.yes,
             do_attach_file_with_base64_encoding(FileName, BaseName, Type,
-                NumRows, MessageUpdate, !AttachInfo, !IO)
+                MaybeAttachmentCharset, NumRows, MessageUpdate,
+                !AttachInfo, !IO)
         )
     ;
         ResDetect = error(Error),
@@ -1135,19 +1185,19 @@ do_attach_file_2(FileName, NumRows, MessageUpdate, !AttachInfo, !IO) :-
         MessageUpdate = set_warning(Msg)
     ).
 
-:- pred acceptable_charset(string::in) is semidet.
+:- pred is_utf8_compatible(string::in) is semidet.
 
-acceptable_charset(Charset) :-
+is_utf8_compatible(Charset) :-
     ( strcase_equal(Charset, "us-ascii")
     ; strcase_equal(Charset, "utf-8")
     ).
 
-:- pred do_attach_text_file(string::in, string::in, mime_type::in, int::in,
-    message_update::out, attach_info::in, attach_info::out, io::di, io::uo)
-    is det.
+:- pred do_attach_file_without_base64_encoding(string::in, string::in,
+    mime_type::in, maybe(attachment_charset)::in, int::in, message_update::out,
+    attach_info::in, attach_info::out, io::di, io::uo) is det.
 
-do_attach_text_file(FileName, BaseName, Type, NumRows, MessageUpdate,
-        !AttachInfo, !IO) :-
+do_attach_file_without_base64_encoding(FileName, BaseName, Type, MaybeCharset,
+        NumRows, MessageUpdate, !AttachInfo, !IO) :-
     io.open_input(FileName, ResOpen, !IO),
     (
         ResOpen = ok(Input),
@@ -1156,8 +1206,8 @@ do_attach_text_file(FileName, BaseName, Type, NumRows, MessageUpdate,
         (
             ResRead = ok(Content),
             string.length(Content, Size),
-            NewAttachment = new_attachment(Type, text(Content), BaseName,
-                Size),
+            NewAttachment = new_attachment(Type, MaybeCharset,
+                text_content(Content), BaseName, Size),
             append_attachment(NewAttachment, NumRows, !AttachInfo),
             MessageUpdate = clear_message
         ;
@@ -1174,19 +1224,19 @@ do_attach_text_file(FileName, BaseName, Type, NumRows, MessageUpdate,
     ).
 
 :- pred do_attach_file_with_base64_encoding(string::in, string::in,
-    mime_type::in, int::in, message_update::out,
+    mime_type::in, maybe(attachment_charset)::in, int::in, message_update::out,
     attach_info::in, attach_info::out, io::di, io::uo) is det.
 
-do_attach_file_with_base64_encoding(FileName, BaseName, Type, NumRows,
-        MessageUpdate, !AttachInfo, !IO) :-
+do_attach_file_with_base64_encoding(FileName, BaseName, Type,
+        MaybeCharset, NumRows, MessageUpdate, !AttachInfo, !IO) :-
     make_quoted_command(base64_command, [FileName],
         redirect_input("/dev/null"), no_redirect, Command),
-    call_system_capture_stdout(Command, no, CallRes, !IO),
+    call_system_capture_stdout(Command, environ([]), no, CallRes, !IO),
     (
         CallRes = ok(Content),
         string.length(Content, Size),
-        NewAttachment = new_attachment(Type, base64_encoded(Content), BaseName,
-            Size),
+        NewAttachment = new_attachment(Type, MaybeCharset,
+            base64_encoded(Content), BaseName, Size),
         append_attachment(NewAttachment, NumRows, !AttachInfo),
         MessageUpdate = clear_message
     ;
@@ -1225,7 +1275,8 @@ delete_attachment(Screen, !AttachInfo, !IO) :-
 edit_attachment_type(Screen, !AttachInfo, !IO) :-
     ( scrollable.get_cursor_line(!.AttachInfo, _Line, Attachment0) ->
         (
-            Attachment0 = new_attachment(Type0, Content, FileName, Size),
+            Attachment0 = new_attachment(Type0, MaybeCharset0, Content,
+                FileName, Size),
             % Supply some useful media types.
             History0 = init_history,
             add_history_nodup("application/octet-stream", History0, History1),
@@ -1238,7 +1289,13 @@ edit_attachment_type(Screen, !AttachInfo, !IO) :-
                 TypeString \= ""
             ->
                 ( accept_media_type(TypeString, Type) ->
-                    Attachment = new_attachment(Type, Content, FileName, Size),
+                    ( is_text(Type) ->
+                        MaybeCharset = MaybeCharset0
+                    ;
+                        MaybeCharset = no
+                    ),
+                    Attachment = new_attachment(Type, MaybeCharset, Content,
+                        FileName, Size),
                     scrollable.set_cursor_line(Attachment, !AttachInfo),
                     MessageUpdate = clear_message
                 ;
@@ -1608,9 +1665,22 @@ draw_attachment_line(Attrs, Screen, Panel, Attachment, LineNr, IsCursor, !IO)
         :-
     (
         Attachment = old_attachment(Part),
-        Part = part(_MessageId, _PartId, ContentType, MaybeContentDisposition,
-            _Content, MaybeFilename, MaybeContentLength, _MaybeCTE,
-            _IsDecrypted),
+        Part = part(_MessageId, _PartId, ContentType, MaybeContentCharset,
+            MaybeContentDisposition, _Content, MaybeFilename,
+            MaybeContentLength, _MaybeCTE, _IsDecrypted),
+        (
+            MaybeContentCharset = yes(content_charset(DrawCharset))
+        ;
+            MaybeContentCharset = no,
+            % XXX notmuch show --format=json never supplies the charset for
+            % text/plain attachments because it is supposed to convert text
+            % content to UTF-8, but that does not appear to happen.
+            ( is_text(ContentType) ->
+                DrawCharset = "(none)"
+            ;
+                DrawCharset = ""
+            )
+        ),
         (
             MaybeFilename = yes(filename(Filename))
         ;
@@ -1618,7 +1688,14 @@ draw_attachment_line(Attrs, Screen, Panel, Attachment, LineNr, IsCursor, !IO)
             Filename = "(no filename)"
         )
     ;
-        Attachment = new_attachment(ContentType, _, Filename, Size),
+        Attachment = new_attachment(ContentType, MaybeAttachmentCharset,
+            _Content, Filename, Size),
+        (
+            MaybeAttachmentCharset = yes(attachment_charset(DrawCharset))
+        ;
+            MaybeAttachmentCharset = no,
+            DrawCharset = ""
+        ),
         MaybeContentDisposition = no,
         MaybeContentLength = yes(content_length(Size))
     ),
@@ -1636,14 +1713,14 @@ draw_attachment_line(Attrs, Screen, Panel, Attachment, LineNr, IsCursor, !IO)
     draw(Screen, Panel, FilenameAttr, Filename, !IO),
     draw(Screen, Panel, Attr, " (", !IO),
     draw(Screen, Panel, Attr, mime_type.to_string(ContentType), !IO),
-    /*
     (
-        MaybeContentCharset = yes(content_charset(Charset)),
-        draw(Panel, Attr, "; charset=" ++ Charset, !IO)
+        DrawCharset \= "",
+        DrawCharset \= "binary"
+    ->
+        draw(Screen, Panel, Attr, "; charset=" ++ DrawCharset, !IO)
     ;
-        MaybeContentCharset = no
+        true
     ),
-    */
     (
         MaybeContentDisposition = yes(content_disposition(Disposition)),
         Disposition \= "attachment"
@@ -2051,7 +2128,7 @@ create_temp_message_file(Config, Prepare, Headers, ParsedHeaders, Text,
 
 make_headers(Prepare, Headers, ParsedHeaders, Date, MessageId, WriteHeaders) :-
     Headers = headers(_Date, _From, _To, _Cc, _Bcc, Subject, _ReplyTo,
-        References, InReplyTo, RestHeaders),
+        InReplyTo, References, RestHeaders),
     ParsedHeaders = parsed_headers(From, To, Cc, Bcc, ReplyTo),
     some [!Acc] (
         !:Acc = [],
@@ -2141,8 +2218,8 @@ maybe_cons_unstructured(SkipEmpty, Options, FieldName, Value, !Acc) :-
 
 make_text_and_attachments_mime_part(TextCTE, Text, Attachments, MixedBoundary,
         MimePart) :-
-    make_text_mime_part(write_content_disposition(inline, no), TextCTE, Text,
-        TextPart),
+    TextPart = discrete(text_plain, yes("utf-8"),
+        yes(write_content_disposition(inline, no)), yes(TextCTE), text(Text)),
     (
         Attachments = [],
         MimePart = TextPart
@@ -2155,34 +2232,33 @@ make_text_and_attachments_mime_part(TextCTE, Text, Attachments, MixedBoundary,
             AttachmentParts)
     ).
 
-:- pred make_text_mime_part(write_content_disposition::in,
-    write_content_transfer_encoding::in, string::in, mime_part::out) is det.
-
-make_text_mime_part(Disposition, TextCTE, Text, MimePart) :-
-    % XXX detect charset
-    MimePart = discrete(text_plain(yes(utf8)), yes(Disposition), yes(TextCTE),
-        text(Text)).
-
 :- pred make_attachment_mime_part(write_content_transfer_encoding::in,
     attachment::in, mime_part::out) is det.
 
 make_attachment_mime_part(TextCTE, Attachment, MimePart) :-
     (
         Attachment = old_attachment(OldPart),
-        OldPart = part(_MessageId, _OldPartId, OldContentType,
-            OldContentDisposition, OldContent, OldFileName, _OldContentLength,
-            _OldCTE, _IsDecrypted),
-        ContentType = content_type(mime_type.to_string(OldContentType)),
+        OldPart = part(_MessageId, _OldPartId, ContentType,
+            OldContentCharset, OldContentDisposition, OldContent, OldFileName,
+            _OldContentLength, _OldCTE, _IsDecrypted),
+        (
+            OldContentCharset = yes(content_charset(Charset)),
+            MaybeCharset = yes(Charset)
+        ;
+            OldContentCharset = no,
+            MaybeCharset = no
+        ),
         convert_old_content_disposition(OldContentDisposition, OldFileName,
             MaybeWriteContentDisposition),
         (
             OldContent = text(Text),
-            MimePart = discrete(ContentType, MaybeWriteContentDisposition,
-                yes(cte_8bit), text(Text))
+            MimePart = discrete(ContentType, MaybeCharset,
+                MaybeWriteContentDisposition, yes(cte_8bit), text(Text))
         ;
             OldContent = unsupported,
-            MimePart = discrete(ContentType, MaybeWriteContentDisposition,
-                yes(cte_base64), external(OldPart))
+            MimePart = discrete(ContentType, MaybeCharset,
+                MaybeWriteContentDisposition, yes(cte_base64),
+                external(OldPart))
         ;
             OldContent = subparts(_, _, _),
             unexpected($module, $pred, "nested part")
@@ -2191,17 +2267,24 @@ make_attachment_mime_part(TextCTE, Attachment, MimePart) :-
             unexpected($module, $pred, "encapsulated_messages")
         )
     ;
-        Attachment = new_attachment(Type, Content, FileName, _Size),
+        Attachment = new_attachment(Type, MaybeAttachmentCharset, Content,
+            FileName, _Size),
+        (
+            MaybeAttachmentCharset = yes(attachment_charset(Charset)),
+            MaybeCharset = yes(Charset)
+        ;
+            MaybeAttachmentCharset = no,
+            MaybeCharset = no
+        ),
         WriteContentDisposition = write_content_disposition(attachment,
             yes(filename(FileName))),
         (
-            Content = text(Text),
-            make_text_mime_part(WriteContentDisposition, TextCTE, Text,
-                MimePart)
+            Content = text_content(Text),
+            MimePart = discrete(text_plain, MaybeCharset,
+                yes(WriteContentDisposition), yes(TextCTE), text(Text))
         ;
             Content = base64_encoded(Base64),
-            TypeString = mime_type.to_string(Type),
-            MimePart = discrete(content_type(TypeString),
+            MimePart = discrete(Type, MaybeCharset,
                 yes(WriteContentDisposition), yes(cte_base64), base64(Base64))
         )
     ).
@@ -2294,9 +2377,10 @@ make_multipart_encrypted_mime_part(Cipher, Boundary, MultiPart) :-
     % RFC 3156
     MultiPart = composite(multipart_encrypted(application_pgp_encrypted),
         Boundary, no, no, [SubPartA, SubPartB]),
-    SubPartA = discrete(application_pgp_encrypted, no, no,
+    SubPartA = discrete(application_pgp_encrypted, no, no, no,
         text("Version: 1\n")),
-    SubPartB = discrete(application_octet_stream, no, no, text(Cipher)).
+    SubPartB = discrete(application_octet_stream, no, no, no,
+        text(Cipher)).
 
 :- pred make_multipart_signed_mime_part(mime_part::in, string::in, micalg::in,
     boundary::in, mime_part::out) is det.
@@ -2305,7 +2389,7 @@ make_multipart_signed_mime_part(SignedPart, Sig, MicAlg, Boundary, MultiPart) :-
     % RFC 3156
     MultiPart = composite(multipart_signed(MicAlg, application_pgp_signature),
         Boundary, no, no, [SignedPart, SignaturePart]),
-    SignaturePart = discrete(application_pgp_signature, no, no, text(Sig)).
+    SignaturePart = discrete(application_pgp_signature, no, no, no, text(Sig)).
 
 %-----------------------------------------------------------------------------%
 

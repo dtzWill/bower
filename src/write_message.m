@@ -12,6 +12,7 @@
 :- import_module stream.
 
 :- import_module data.
+:- import_module mime_type.
 :- import_module prog_config.
 :- import_module rfc5322.
 :- import_module send_util.
@@ -44,8 +45,8 @@
 
 :- type mime_part
     --->    discrete(
-                discrete_content_type,
-                % maybe(content_charset)?
+                mime_type,
+                maybe(string),  % charset
                 maybe(write_content_disposition),
                 maybe(write_content_transfer_encoding),
                 mime_part_body
@@ -61,20 +62,10 @@
 :- type mime_version
     --->    mime_version_1_0.
 
-:- type discrete_content_type
-    --->    text_plain(maybe(charset))
-    ;       application_octet_stream
-    ;       application_pgp_encrypted
-    ;       application_pgp_signature
-    ;       content_type(string).
-
 :- type composite_content_type
     --->    multipart_mixed
     ;       multipart_encrypted(protocol)
     ;       multipart_signed(micalg, protocol).
-
-:- type charset
-    --->    utf8.
 
 :- type boundary
     --->    boundary(string).
@@ -144,6 +135,7 @@
 
 :- import_module base64.
 :- import_module call_system.
+:- import_module process.
 :- import_module quote_arg.
 :- import_module rfc2045.
 :- import_module rfc2231.
@@ -286,9 +278,9 @@ write_mime_part(Stream, Config, MimePart, PausedCurs, Res, !IO) :-
 
 write_mime_part_nocatch(Stream, Config, MimePart, PausedCurs, !IO) :-
     (
-        MimePart = discrete(ContentType, MaybeContentDisposition,
+        MimePart = discrete(ContentType, MaybeCharset, MaybeContentDisposition,
             MaybeTransferEncoding, Body),
-        write_discrete_content_type(Stream, ContentType, !IO),
+        write_discrete_content_type(Stream, ContentType, MaybeCharset, !IO),
         fold_maybe(write_content_disposition(Stream),
             MaybeContentDisposition, !IO),
         fold_maybe(write_content_transfer_encoding(Stream),
@@ -318,33 +310,19 @@ write_mime_part_nocatch(Stream, Config, MimePart, PausedCurs, !IO) :-
         write_mime_final_boundary(Stream, Boundary, !IO)
     ).
 
-:- pred write_discrete_content_type(Stream::in, discrete_content_type::in,
-    io::di, io::uo) is det <= writer(Stream).
+:- pred write_discrete_content_type(Stream::in, mime_type::in,
+    maybe(string)::in, io::di, io::uo) is det <= writer(Stream).
 
-write_discrete_content_type(Stream, ContentType, !IO) :-
-    (
-        ContentType = text_plain(MaybeCharset),
-        (
-            MaybeCharset = yes(utf8),
-            Value = "text/plain; charset=utf-8"
-        ;
-            MaybeCharset = no,
-            Value = "text/plain"
-        )
-    ;
-        ContentType = application_octet_stream,
-        Value = "application/octet-stream"
-    ;
-        ContentType = application_pgp_encrypted,
-        Value = "application/pgp-encrypted"
-    ;
-        ContentType = application_pgp_signature,
-        Value = "application/pgp-signature; name=""signature.asc"""
-    ;
-        ContentType = content_type(Value)
-    ),
+write_discrete_content_type(Stream, ContentType, MaybeCharset, !IO) :-
     put(Stream, "Content-Type: ", !IO),
-    put(Stream, Value, !IO),
+    put(Stream, mime_type.to_string(ContentType), !IO),
+    (
+        MaybeCharset = yes(Charset),
+        put(Stream, "; charset=", !IO),
+        put(Stream, Charset, !IO)
+    ;
+        MaybeCharset = no
+    ),
     put(Stream, "\n", !IO).
 
 :- pred write_composite_content_type(Stream::in, composite_content_type::in,
@@ -486,7 +464,7 @@ write_mime_part_body(Stream, Config, TransferEncoding, Body, PausedCurs,
     i_paused_curses::in, io::di, io::uo) is det.
 
 get_external_part_base64(Config, Part, Content, PausedCurs, !IO) :-
-    Part = part(MessageId, MaybePartId, _, _, _, _, _, _, IsDecrypted),
+    Part = part(MessageId, MaybePartId, _, _, _, _, _, _, _, IsDecrypted),
     (
         MaybePartId = yes(PartId),
         get_notmuch_command(Config, Notmuch),
@@ -498,7 +476,8 @@ get_external_part_base64(Config, Part, Content, PausedCurs, !IO) :-
         ], redirect_input("/dev/null"), no_redirect, Command),
         % Decryption may invoke pinentry-curses.
         PausedCurs = i_paused_curses,
-        call_system_capture_stdout(Command ++ " |base64", no, CallRes, !IO)
+        call_system_capture_stdout(Command ++ " |base64", environ([]), no,
+            CallRes, !IO)
     ;
         MaybePartId = no,
         CallRes = error(io.make_io_error("no part id"))

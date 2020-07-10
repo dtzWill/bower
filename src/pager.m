@@ -101,6 +101,9 @@
 :- pred get_percent_visible(pager_info::in, int::in, message_id::in, int::out)
     is semidet.
 
+:- pred get_part_visibility_map(pager_info::in, message_id::in,
+    part_visibility_map::out) is det.
+
 :- pred draw_pager_lines(screen::in, list(vpanel)::in, pager_attrs::in,
     pager_info::in, io::di, io::uo) is det.
 
@@ -427,13 +430,15 @@ make_part_tree(Config, Cols, Part, Tree, !ElideInitialHeadLine, !Counter, !IO)
 
 make_part_tree_with_alts(Config, Cols, AltParts, Part, HandleUnsupported, Tree,
         !ElideInitialHeadLine, !Counter, !IO) :-
-    Part = part(_MessageId, _PartId, PartType, _MaybeContentDisposition,
-        Content, _MaybeFilename, _MaybeContentLength, _MaybeCTE, _IsDecrypted),
+    Part = part(_MessageId, _PartId, PartType, MaybeContentCharset,
+        _MaybeContentDisposition, Content, _MaybeFilename, _MaybeContentLength,
+        _MaybeCTE, _IsDecrypted),
     allocate_node_id(PartNodeId, !Counter),
     (
         Content = text(InlineText),
         ( get_text_filter_command(Config, PartType, FilterCommand) ->
-            filter_text_part(FilterCommand, InlineText, FilterRes, !IO),
+            filter_text_part(FilterCommand, PartType, MaybeContentCharset,
+                InlineText, FilterRes, !IO),
             (
                 FilterRes = ok(Text)
             ;
@@ -721,9 +726,9 @@ add_encapsulated_header(Header, Value, RevLines0, RevLines) :-
 
 make_unsupported_part_tree(Config, Cols, PartNodeId, Part, HandleUnsupported,
         AltParts, Tree, !IO) :-
-    Part = part(MessageId, MaybePartId, PartType, _MaybeContentDisposition,
-        _Content, _MaybeFilename, _MaybeContentLength, _MaybeCTE,
-        _IsDecrypted),
+    Part = part(MessageId, MaybePartId, PartType, MaybeContentCharset,
+        _MaybeContentDisposition, _Content, _MaybeFilename,
+        _MaybeContentLength, _MaybeCTE, _IsDecrypted),
     (
         HandleUnsupported = default,
         DoExpand = ( if PartType = mime_type.text_html then yes else no )
@@ -744,8 +749,8 @@ make_unsupported_part_tree(Config, Cols, PartNodeId, Part, HandleUnsupported,
             MaybeFilterCommand = no,
             Filtered = part_not_filtered
         ),
-        expand_part(Config, MessageId, PartId, MaybeFilterCommand,
-            MaybeText, !IO),
+        expand_part(Config, MessageId, PartId, PartType, MaybeContentCharset,
+            MaybeFilterCommand, MaybeText, !IO),
         (
             MaybeText = ok(Text),
             get_wrap_width(Config, Cols, WrapWidth),
@@ -1321,7 +1326,7 @@ get_highlighted_thing(Info, Thing) :-
         Subject = Message ^ m_headers ^ h_subject,
         PartId = 0,
         % Hmm.
-        Part = part(MessageId, yes(PartId), mime_type.text_plain,
+        Part = part(MessageId, yes(PartId), mime_type.text_plain, no,
             no, unsupported, no, no, no, not_decrypted),
         MaybeSubject = yes(Subject),
         Thing = highlighted_part(Part, MaybeSubject)
@@ -1593,6 +1598,76 @@ get_percent_visible(Info, NumPagerRows, MessageId, Percent) :-
 
 %-----------------------------------------------------------------------------%
 
+get_part_visibility_map(Info, MessageId, Map) :-
+    Scrollable = Info ^ p_scrollable,
+    Extents = Info ^ p_extents,
+    ( map.search(Extents, MessageId, MessageExtents) ->
+        MessageExtents = message_extents(Start, EndExcl),
+        make_part_visibility_map_in_extents(Scrollable, Start, EndExcl,
+            map.init, Map)
+    ;
+        Map = map.init
+    ).
+
+:- pred make_part_visibility_map_in_extents(scrollable(id_pager_line)::in,
+    int::in, int::in, part_visibility_map::in, part_visibility_map::out)
+    is det.
+
+make_part_visibility_map_in_extents(Scrollable, Cur, EndExcl, !Map) :-
+    (
+        Cur < EndExcl,
+        get_line(Scrollable, Cur, Line)
+    ->
+        Line = _NodeId - PagerLine,
+        make_part_visibility_map_in_line(PagerLine, !Map),
+        make_part_visibility_map_in_extents(Scrollable, Cur + 1, EndExcl, !Map)
+    ;
+        true
+    ).
+
+:- pred make_part_visibility_map_in_line(pager_line::in,
+    part_visibility_map::in, part_visibility_map::out) is det.
+
+make_part_visibility_map_in_line(PagerLine, !Map) :-
+    (
+        PagerLine = part_head(FirstPart, HiddenParts, PartExpanded, _Importance),
+        (
+            PartExpanded = part_expanded(_Filtered),
+            FirstPartVisibility = part_visible
+        ;
+            PartExpanded = part_not_expanded,
+            FirstPartVisibility = part_hidden
+        ),
+        add_part_visibility(FirstPartVisibility, FirstPart, !Map),
+        foldl(add_part_visibility(part_hidden), HiddenParts, !Map)
+    ;
+        PagerLine = fold_marker(PagerLines, _Expanded),
+        list.foldl(make_part_visibility_map_in_line, PagerLines, !Map)
+    ;
+        ( PagerLine = start_of_message_header(_, _, _)
+        ; PagerLine = subseq_message_header(_, _, _)
+        ; PagerLine = text(_)
+        ; PagerLine = signature(_)
+        ; PagerLine = message_separator
+        )
+    ).
+
+:- pred add_part_visibility(part_visibility::in, part::in,
+    part_visibility_map::in, part_visibility_map::out) is det.
+
+add_part_visibility(PartVisibility, Part, !Map) :-
+    MessageId = Part ^ pt_msgid,
+    MaybePartId = Part ^ pt_part,
+    (
+        MaybePartId = yes(PartId),
+        map.det_insert(message_part_id(MessageId, PartId), PartVisibility,
+            !Map)
+    ;
+        MaybePartId = no
+    ).
+
+%-----------------------------------------------------------------------------%
+
 draw_pager_lines(Screen, Panels, Attrs, Info, !IO) :-
     Scrollable = Info ^ p_scrollable,
     scrollable.draw(draw_id_pager_line(Attrs), Screen, Panels, Scrollable,
@@ -1677,9 +1752,9 @@ draw_pager_line(Attrs, Screen, Panel, Line, IsCursor, !IO) :-
         )
     ;
         Line = part_head(Part, HiddenParts, Expanded, Importance),
-        Part = part(_MessageId, _Part, ContentType, _MaybeContentDisposition,
-            _Content, MaybeFilename, MaybeContentLength, MaybeCTE,
-            _IsDecrypted),
+        Part = part(_MessageId, _Part, ContentType, MaybeContentCharset,
+            _MaybeContentDisposition, _Content, MaybeFilename,
+            MaybeContentLength, MaybeCTE, _IsDecrypted),
         (
             Importance = importance_normal,
             Attr0 = Attrs ^ p_part_head
@@ -1697,6 +1772,15 @@ draw_pager_line(Attrs, Screen, Panel, Line, IsCursor, !IO) :-
         draw(Screen, Panel, Attr, "[-- ", !IO),
         draw(Screen, Panel, mime_type.to_string(ContentType), !IO),
         (
+            MaybeContentCharset = yes(content_charset(Charset)),
+            Charset \= "binary"
+        ->
+            draw(Screen, Panel, "; charset=", !IO),
+            draw(Screen, Panel, Charset, !IO)
+        ;
+            true
+        ),
+        (
             MaybeFilename = yes(filename(Filename)),
             draw(Screen, Panel, "; ", !IO),
             draw(Screen, Panel, Filename, !IO)
@@ -1710,13 +1794,6 @@ draw_pager_line(Attrs, Screen, Panel, Line, IsCursor, !IO) :-
             draw(Screen, Panel, Disposition, !IO)
         ;
             MaybeContentDisposition = no
-        ),
-        (
-            MaybeContentCharset = yes(content_charset(Charset)),
-            draw(Screen, Panel, "; charset=", !IO),
-            draw(Screen, Panel, Charset, !IO)
-        ;
-            MaybeContentCharset = no
         ),
         */
         (

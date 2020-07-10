@@ -62,6 +62,9 @@
 :- type message_id
     --->    message_id(string).
 
+:- type message_part_id
+    --->    message_part_id(message_id, int).   % XXX bespoke type for part_id
+
 :- type headers
     --->    headers(
                 % Technically, header fields.
@@ -72,8 +75,8 @@
                 h_bcc           :: header_value,
                 h_subject       :: header_value,
                 h_replyto       :: header_value,
-                h_references    :: header_value,
                 h_inreplyto     :: header_value,
+                h_references    :: header_value,
                 % XXX should use a distinct type for header field names
                 % for they are case-insensitive
                 h_rest          :: map(string, header_value)
@@ -89,11 +92,14 @@
 :- type tag
     --->    tag(string).
 
-:- type filename
-    --->    filename(string).
+:- type content_charset
+    --->    content_charset(string).
 
 :- type content_disposition
     --->    content_disposition(string).
+
+:- type filename
+    --->    filename(string).
 
 :- type content_length
     --->    content_length(int).
@@ -106,6 +112,7 @@
                 pt_msgid                :: message_id,
                 pt_part                 :: maybe(int), % XXX use bespoke type
                 pt_content_type         :: mime_type,
+                pt_content_charset      :: maybe(content_charset),
                 pt_content_disposition  :: maybe(content_disposition),
                 pt_content              :: part_content,
                 pt_filename             :: maybe(filename),
@@ -159,6 +166,24 @@
 :- type maybe_decrypted
     --->    not_decrypted
     ;       is_decrypted.
+
+:- type reply_headers
+    --->    reply_headers(
+                % The order matches notmuch/devel/schemata.
+                subject         :: string,
+                from            :: string,
+                to              :: maybe(string),
+                cc              :: maybe(string),
+                bcc             :: maybe(string),
+                inreplyto       :: string,
+                references      :: string
+            ).
+
+:- type part_visibility_map == map(message_part_id, part_visibility).
+
+:- type part_visibility
+    --->    part_visible
+    ;       part_hidden.
 
 %-----------------------------------------------------------------------------%
 

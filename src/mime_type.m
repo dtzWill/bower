@@ -15,6 +15,7 @@
 :- pred parse_mime_type(string, mime_type, string, string).
 :- mode parse_mime_type(in, out, out, out) is semidet.
 
+:- pred is_text(mime_type::in) is semidet.
 :- pred is_multipart(mime_type::in) is semidet.
 
 :- func text_plain = mime_type.
@@ -25,8 +26,10 @@
 :- func multipart_related = mime_type.
 :- func multipart_signed = mime_type.
 :- func multipart_encrypted = mime_type.
+:- func application_octet_stream = mime_type.
 :- func application_pgp_encrypted = mime_type.
 :- func application_pgp_signature = mime_type.
+:- func application_pkcs7_mime = mime_type.
 
 %-----------------------------------------------------------------------------%
 %-----------------------------------------------------------------------------%
@@ -58,6 +61,9 @@ parse_mime_type(String, MimeType, Type, SubType) :-
 
 %-----------------------------------------------------------------------------%
 
+is_text(mime_type(Type)) :-
+    string.prefix(Type, "text/").
+
 is_multipart(mime_type(Type)) :-
     string.prefix(Type, "multipart/").
 
@@ -69,8 +75,10 @@ multipart_mixed = mime_type("multipart/mixed").
 multipart_related = mime_type("multipart/related").
 multipart_signed = mime_type("multipart/signed").
 multipart_encrypted = mime_type("multipart/encrypted").
+application_octet_stream = mime_type("application/octet-stream").
 application_pgp_encrypted = mime_type("application/pgp-encrypted").
 application_pgp_signature = mime_type("application/pgp-signature").
+application_pkcs7_mime = mime_type("application/pkcs7-mime").
 
 %-----------------------------------------------------------------------------%
 % vim: ft=mercury ts=4 sts=4 sw=4 et

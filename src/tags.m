@@ -95,8 +95,16 @@ nondisplay_tag(tag("replied")).
 nondisplay_tag(tag("sent")).
 nondisplay_tag(tag("signed")).
 nondisplay_tag(tag("unread")).
+nondisplay_tag(tag(String)) :-
+    string.prefix(String, ".").
+
+%-----------------------------------------------------------------------------%
+% DTZ
+%-----------------------------------------------------------------------------%
+
 nondisplay_tag(tag("important")).
 nondisplay_tag(tag("inbox")).
+
 nondisplay_tag(tag("lists")).
 nondisplay_tag(tag("old/Research")).
 nondisplay_tag(tag("llvm dev lists/llvm-commits")).

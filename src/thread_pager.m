@@ -778,12 +778,14 @@ thread_pager_loop(Screen, OnEntry, !Info, !IO) :-
     ;
         Action = start_reply(Message, ReplyKind),
         (
-            Message = message(_, _, _, _, _, _),
+            Message = message(MessageId, _, _, _, _, _),
             flush_async_with_progress(Screen, !IO),
             Config = !.Info ^ tp_config,
             Crypto = !.Info ^ tp_crypto,
-            start_reply(Config, Crypto, Screen, Message, ReplyKind, Transition,
-                !IO),
+            Pager = !.Info ^ tp_pager,
+            get_part_visibility_map(Pager, MessageId, PartVisibilityMap),
+            start_reply(Config, Crypto, Screen, Message, ReplyKind,
+                PartVisibilityMap, Transition, !IO),
             handle_screen_transition(Screen, Transition, Sent, !Info, !IO),
             (
                 Sent = sent,
@@ -801,11 +803,14 @@ thread_pager_loop(Screen, OnEntry, !Info, !IO) :-
     ;
         Action = start_forward(Message),
         (
-            Message = message(_, _, _, _, _, _),
+            Message = message(MessageId, _, _, _, _, _),
             flush_async_with_progress(Screen, !IO),
             Config = !.Info ^ tp_config,
             Crypto = !.Info ^ tp_crypto,
-            start_forward(Config, Crypto, Screen, Message, Transition, !IO),
+            Pager = !.Info ^ tp_pager,
+            get_part_visibility_map(Pager, MessageId, PartVisibilityMap),
+            start_forward(Config, Crypto, Screen, Message, PartVisibilityMap,
+                Transition, !IO),
             handle_screen_transition(Screen, Transition, _Sent, !Info, !IO)
         ;
             Message = excluded_message(_, _, _, _, _)
@@ -1917,9 +1922,9 @@ save_part(Action, MessageUpdate, !Info) :-
     thread_pager_info::in, thread_pager_info::out, io::di, io::uo) is det.
 
 prompt_save_part(Screen, Part, MaybeSubject, !Info, !IO) :-
-    Part = part(MessageId, MaybePartId, _Type, _MaybeContentDisposition,
-        _Content, MaybePartFilename, _MaybeContentLength, _MaybeCTE,
-        IsDecrypted),
+    Part = part(MessageId, MaybePartId, _Type, _MaybeContentCharset,
+        _MaybeContentDisposition, _Content, MaybePartFilename,
+        _MaybeContentLength, _MaybeCTE, IsDecrypted),
     (
         MaybePartFilename = yes(filename(PartFilename))
     ;
@@ -2140,9 +2145,9 @@ do_open_part(Config, Screen, Part, Command, MessageUpdate, MaybeNextKey,
 
 do_open_part_2(Config, Screen, Part, CommandWords, MessageUpdate, MaybeNextKey,
         !Info, !IO) :-
-    Part = part(MessageId, MaybePartId, _ContentType, _MaybeContentDisposition,
-        _Content, MaybePartFileName, _MaybeContentLength, _MaybeCTE,
-        IsDecrypted),
+    Part = part(MessageId, MaybePartId, _ContentType, _MaybeContentCharset,
+        _MaybeContentDisposition, _Content, MaybePartFileName,
+        _MaybeContentLength, _MaybeCTE, IsDecrypted),
     (
         MaybePartFileName = yes(filename(PartFilename)),
         get_extension(PartFilename, Ext)
@@ -2511,8 +2516,8 @@ verify_part(Screen, !Info, !IO) :-
 
 do_verify_part(Screen, Part0, MessageUpdate, !Info, !IO) :-
     Part0 = part(MessageId, MaybePartId, Type, _MaybeContentDisposition0,
-        _Content0, _MaybeFilename0, _MaybeContentLength, _MaybeCTE,
-        IsDecrypted),
+        _Content0, _MaybeFilename0, _MaybeContentCharset, _MaybeContentLength,
+        _MaybeCTE, IsDecrypted),
     (
         MaybePartId = yes(PartId),
         Config = !.Info ^ tp_config,
@@ -2531,11 +2536,11 @@ do_verify_part(Screen, Part0, MessageUpdate, !Info, !IO) :-
         (
             ParseResult = ok(Part1),
             (
-                Part1 = part(MessageId, MaybePartId, Type,
+                Part1 = part(MessageId, MaybePartId, Type, MaybeContentCharset,
                     MaybeContentDisposition, Content, MaybeFilename,
                     MaybeContentLength, MaybeCTE, _IsDecrypted1)
             ->
-                Part = part(MessageId, MaybePartId, Type,
+                Part = part(MessageId, MaybePartId, Type, MaybeContentCharset,
                     MaybeContentDisposition, Content, MaybeFilename,
                     MaybeContentLength, MaybeCTE, IsDecrypted),
 
@@ -2777,8 +2782,9 @@ handle_recall(Screen, ThreadId, Sent, !Info, !IO) :-
         MaybeSelected = yes(Message),
         (
             Message = message(_, _, _, _, _, _),
+            PartVisibilityMap = map.init,
             continue_from_message(Config, Crypto, Screen, postponed_message,
-                Message, TransitionB, !IO),
+                Message, PartVisibilityMap, TransitionB, !IO),
             handle_screen_transition(Screen, TransitionB, Sent, !Info, !IO)
         ;
             Message = excluded_message(_, _, _, _, _),
@@ -2810,10 +2816,12 @@ edit_as_template(Info, Action, MessageUpdate) :-
 handle_edit_as_template(Screen, Message, Sent, !Info, !IO) :-
     Config = !.Info ^ tp_config,
     Crypto = !.Info ^ tp_crypto,
+    Pager = !.Info ^ tp_pager,
     (
-        Message = message(_, _, _, _, _, _),
+        Message = message(MessageId, _, _, _, _, _),
+        get_part_visibility_map(Pager, MessageId, PartVisibilityMap),
         continue_from_message(Config, Crypto, Screen, arbitrary_message,
-            Message, Transition, !IO),
+            Message, PartVisibilityMap, Transition, !IO),
         handle_screen_transition(Screen, Transition, Sent, !Info, !IO)
     ;
         Message = excluded_message(_, _, _, _, _),
