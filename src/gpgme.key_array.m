@@ -14,9 +14,9 @@
 
 :- implementation.
 
-:- import_module exception.
 :- import_module int.
-:- import_module require.
+:- use_module exception.
+:- use_module require.
 
 :- pragma foreign_type("C", gpgme_key_array, "gpgme_key_t *").
 
@@ -28,17 +28,17 @@ with_key_array(Pred, Keys, Out, !IO) :-
         make_key_array(Keys, KeyArray, !IO),
         promise_equivalent_solutions [Out, !:IO]
         (
-            try_io(
+            exception.try_io(
                 (pred(R::out, IO0::di, IO::uo) is det :-
                     Pred(KeyArray, R, IO0, IO)),
                 TryResult, !IO),
             (
-                TryResult = succeeded(Out),
+                TryResult = exception.succeeded(Out),
                 free_key_array(KeyArray, !IO)
             ;
-                TryResult = exception(Excp),
+                TryResult = exception.exception(Excp),
                 free_key_array(KeyArray, !IO),
-                throw(Excp)
+                exception.throw(Excp)
             )
         )
     ).
@@ -73,7 +73,7 @@ fill_key_array(Index, [Key | Keys], !KeyArray, !IO) :-
         fill_key_array(Index + 1, Keys, !KeyArray, !IO)
     ;
         MaybeKey = no,
-        unexpected($module, $pred, "key already unref'd")
+        require.unexpected($module, $pred, "key already unref'd")
     ).
 
 :- pred set_key_array(int::in, gpgme_key::in,

@@ -68,7 +68,6 @@
 :- import_module map.
 :- import_module maybe.
 :- import_module pair.
-:- import_module require.
 :- import_module set.
 :- import_module string.
 
@@ -411,7 +410,7 @@ start_reply_to_message_id(Config, Crypto, Screen, MessageId, ReplyKind,
             message_id_to_search_term(MessageId)
         ],
         no_suspend_curses,
-        parse_top_message, Res, !IO),
+        parse_message, Res, !IO),
     (
         Res = ok(Message),
         (
@@ -426,7 +425,8 @@ start_reply_to_message_id(Config, Crypto, Screen, MessageId, ReplyKind,
         )
     ;
         Res = error(Error),
-        unexpected($module, $pred, Error)
+        Warning = "notmuch show: " ++ Error,
+        Transition = screen_transition(not_sent, set_warning(Warning))
     ).
 
 %-----------------------------------------------------------------------------%
@@ -455,7 +455,7 @@ start_forward(Config, Crypto, Screen, Message, PartVisibilityMap, Transition,
 continue_from_message(Config, Crypto, Screen, ContinueBase, Message,
         PartVisibilityMap, Transition, !IO) :-
     Message = message(MessageId, _Timestamp, Headers0, Tags0, Body0, _Replies0),
-    select_main_part_and_attachments(PartVisibilityMap, Body0, MaybeMainPart,
+    select_main_part_and_attachments(PartVisibilityMap, [Body0], MaybeMainPart,
         AttachmentParts),
     (
         MaybeMainPart = yes(MainPart),
@@ -2049,11 +2049,17 @@ create_temp_message_file(Config, Prepare, Headers, ParsedHeaders, Text,
             Sign = no,
             generate_boundary(MixedBoundary, RS0, _RS),
             make_text_and_attachments_mime_part(cte_8bit, Text, Attachments,
-                boundary(MixedBoundary), MimePart),
-            Spec = message_spec(WriteHeaders, mime_v1(MimePart)),
-            curs.soft_suspend(
-                write_temp_message_file(Config, Prepare, Spec,
-                    i_paused_curses), Res, !IO),
+                boundary(MixedBoundary), Res0),
+            (
+                Res0 = ok(MimePart),
+                Spec = message_spec(WriteHeaders, mime_v1(MimePart)),
+                curs.soft_suspend(
+                    write_temp_message_file(Config, Prepare, Spec,
+                        i_paused_curses), Res, !IO)
+            ;
+                Res0 = error(Error),
+                Res = error(Error)
+            ),
             Warnings = []
         ;
             Encrypt = yes,
@@ -2086,14 +2092,21 @@ create_temp_message_file(Config, Prepare, Headers, ParsedHeaders, Text,
                 leaked_bccs_warning(LeakedBccs, WarningsB),
                 generate_boundary(MixedBoundary, RS0, RS1),
                 make_text_and_attachments_mime_part(TextCTE, Text, Attachments,
-                    boundary(MixedBoundary), PartToEncrypt),
-                generate_boundary(EncryptedBoundary, RS1, _RS),
-                curs.soft_suspend(
-                    encrypt_then_write_temp_message_file(Config, Prepare,
-                        WriteHeaders, PartToEncrypt,
-                        CryptoInfo, MaybeSigners, EncryptKeys,
-                        boundary(EncryptedBoundary), i_paused_curses),
-                    {Res, WarningsC}, !IO),
+                    boundary(MixedBoundary), Res0),
+                (
+                    Res0 = ok(PartToEncrypt),
+                    generate_boundary(EncryptedBoundary, RS1, _RS),
+                    curs.soft_suspend(
+                        encrypt_then_write_temp_message_file(Config, Prepare,
+                            WriteHeaders, PartToEncrypt,
+                            CryptoInfo, MaybeSigners, EncryptKeys,
+                            boundary(EncryptedBoundary), i_paused_curses),
+                        {Res, WarningsC}, !IO)
+                ;
+                    Res0 = error(Error),
+                    Res = error(Error),
+                    WarningsC = []
+                ),
                 Warnings = WarningsA ++ WarningsB ++ WarningsC
             )
         ;
@@ -2110,13 +2123,20 @@ create_temp_message_file(Config, Prepare, Headers, ParsedHeaders, Text,
                 % during transfer.
                 generate_boundary(MixedBoundary, RS0, RS1),
                 make_text_and_attachments_mime_part(cte_base64, Text, Attachments,
-                    boundary(MixedBoundary), PartToSign),
-                generate_boundary(SignedBoundary, RS1, _RS),
-                curs.soft_suspend(
-                    sign_detached_then_write_temp_message_file(Config, Prepare,
-                        WriteHeaders, PartToSign, CryptoInfo, SignKeys,
-                        boundary(SignedBoundary), i_paused_curses),
-                    {Res, Warnings}, !IO)
+                    boundary(MixedBoundary), Res0),
+                (
+                    Res0 = ok(PartToSign),
+                    generate_boundary(SignedBoundary, RS1, _RS),
+                    curs.soft_suspend(
+                        sign_detached_then_write_temp_message_file(Config, Prepare,
+                            WriteHeaders, PartToSign, CryptoInfo, SignKeys,
+                            boundary(SignedBoundary), i_paused_curses),
+                        {Res, Warnings}, !IO)
+                ;
+                    Res0 = error(Error),
+                    Res = error(Error),
+                    Warnings = []
+                )
             )
         )
     ).
@@ -2214,28 +2234,37 @@ maybe_cons_unstructured(SkipEmpty, Options, FieldName, Value, !Acc) :-
 %-----------------------------------------------------------------------------%
 
 :- pred make_text_and_attachments_mime_part(write_content_transfer_encoding::in,
-    string::in, list(attachment)::in, boundary::in, mime_part::out) is det.
+    string::in, list(attachment)::in, boundary::in,
+    maybe_error(mime_part)::out) is det.
 
 make_text_and_attachments_mime_part(TextCTE, Text, Attachments, MixedBoundary,
-        MimePart) :-
+        Res) :-
     TextPart = discrete(text_plain, yes("utf-8"),
         yes(write_content_disposition(inline, no)), yes(TextCTE), text(Text)),
     (
         Attachments = [],
-        MimePart = TextPart
+        Res = ok(TextPart)
     ;
         Attachments = [_ | _],
-        MimePart = composite(multipart_mixed, MixedBoundary,
-            yes(write_content_disposition(inline, no)), yes(cte_8bit),
-            [TextPart | AttachmentParts]),
-        list.map(make_attachment_mime_part(TextCTE), Attachments,
-            AttachmentParts)
+        list.map_foldl(make_attachment_mime_part(TextCTE), Attachments,
+            AttachmentParts, [], AnyErrors),
+        (
+            AnyErrors = [],
+            MultiPart = composite(multipart_mixed, MixedBoundary,
+                yes(write_content_disposition(inline, no)), yes(cte_8bit),
+                [TextPart | AttachmentParts]),
+            Res = ok(MultiPart)
+        ;
+            AnyErrors = [Error | _],
+            % We don't expect any errors so just report any one.
+            Res = error(Error)
+        )
     ).
 
 :- pred make_attachment_mime_part(write_content_transfer_encoding::in,
-    attachment::in, mime_part::out) is det.
+    attachment::in, mime_part::out, list(string)::in, list(string)::out) is det.
 
-make_attachment_mime_part(TextCTE, Attachment, MimePart) :-
+make_attachment_mime_part(TextCTE, Attachment, MimePart, !AnyErrors) :-
     (
         Attachment = old_attachment(OldPart),
         OldPart = part(_MessageId, _OldPartId, ContentType,
@@ -2252,23 +2281,29 @@ make_attachment_mime_part(TextCTE, Attachment, MimePart) :-
             MaybeWriteContentDisposition),
         (
             OldContent = text(Text),
-            MimePart = discrete(ContentType, MaybeCharset,
-                MaybeWriteContentDisposition, yes(cte_8bit), text(Text))
+            MimePartCTE = yes(cte_8bit),
+            MimePartBody = text(Text)
         ;
             OldContent = unsupported,
-            MimePart = discrete(ContentType, MaybeCharset,
-                MaybeWriteContentDisposition, yes(cte_base64),
-                external(OldPart))
+            MimePartCTE = yes(cte_base64),
+            MimePartBody = external(OldPart)
         ;
             OldContent = subparts(_, _, _),
-            unexpected($module, $pred, "nested part")
+            MimePartCTE = no, % dummy
+            MimePartBody = external(OldPart), % dummy
+            cons("Cannot handle old attachment (subparts)", !AnyErrors)
         ;
-            OldContent = encapsulated_messages(_),
-            unexpected($module, $pred, "encapsulated_messages")
-        )
+            OldContent = encapsulated_message(_),
+            MimePartCTE = no, % dummy
+            MimePartBody = external(OldPart), % dummy
+            cons("Cannot handle old attachment (encapsulated_message)",
+                !AnyErrors)
+        ),
+        MimePart = discrete(ContentType, MaybeCharset,
+            MaybeWriteContentDisposition, MimePartCTE, MimePartBody)
     ;
-        Attachment = new_attachment(Type, MaybeAttachmentCharset, Content,
-            FileName, _Size),
+        Attachment = new_attachment(ContentType, MaybeAttachmentCharset,
+            Content, FileName, _Size),
         (
             MaybeAttachmentCharset = yes(attachment_charset(Charset)),
             MaybeCharset = yes(Charset)
@@ -2284,7 +2319,7 @@ make_attachment_mime_part(TextCTE, Attachment, MimePart) :-
                 yes(WriteContentDisposition), yes(TextCTE), text(Text))
         ;
             Content = base64_encoded(Base64),
-            MimePart = discrete(Type, MaybeCharset,
+            MimePart = discrete(ContentType, MaybeCharset,
                 yes(WriteContentDisposition), yes(cte_base64), base64(Base64))
         )
     ).

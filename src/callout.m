@@ -37,19 +37,22 @@
 :- mode run_notmuch(in, in, in, in,
     in(pred(in, out) is det), out, di, uo) is det.
 
-:- pred parse_messages_list(maybe(set(tag))::in, json::in, list(message)::out)
+% NOTE: these parser predicates may throw notmuch_json_errors
+% which are intended to be caught by run_notmuch.
+
+:- pred parse_thread_set(maybe(set(tag))::in, json::in, list(message)::out)
     is det.
 
-:- pred parse_top_message(json::in, message::out) is det.
+:- pred parse_message(json::in, message::out) is det.
 
 :- pred parse_message_for_recall(json::in, message_for_recall::out) is det.
 
 :- pred parse_part(message_id::in, maybe_decrypted::in, json::in, part::out)
     is det.
 
-:- pred parse_threads_list(json::in, list(thread)::out) is det.
+:- pred parse_search_summary(json::in, list(thread)::out) is det.
 
-:- pred parse_message_id_list(json::in, list(message_id)::out) is det.
+:- pred parse_search_messages(json::in, list(message_id)::out) is det.
 
 :- pred parse_address_count_list(json::in, list(pair(int, string))::out)
     is det.
@@ -66,8 +69,8 @@
 :- import_module integer.
 :- import_module map.
 :- import_module parsing_utils.
-:- import_module require.
 :- import_module string.
+:- use_module exception.
 
 :- import_module call_system.
 :- import_module mime_type.
@@ -75,6 +78,9 @@
 :- import_module time_util.
 
 :- use_module curs.
+
+:- type notmuch_json_error
+    --->    notmuch_json_error(string).
 
 %-----------------------------------------------------------------------------%
 
@@ -134,8 +140,13 @@ call_command_parse_json(Command, SuspendCurs, Parser, Result, !IO) :-
         parse_json(String, ParseResult),
         (
             ParseResult = ok(JSON),
-            Parser(JSON, T),
-            Result = ok(T)
+            ( try []
+                Parser(JSON, T)
+            then
+                Result = ok(T)
+            catch notmuch_json_error(Error) ->
+                Result = error(Error)
+            )
         ;
             ParseResult = error(yes(Msg), Line, Column),
             string.format("line %d, column %d: %s",
@@ -154,66 +165,134 @@ call_command_parse_json(Command, SuspendCurs, Parser, Result, !IO) :-
 
 %-----------------------------------------------------------------------------%
 
-parse_messages_list(CustomExcludeTags, JSON, Messages) :-
-    ( JSON = list([List]) ->
-        parse_inner_message_list(CustomExcludeTags, List, Messages)
-    ; JSON = list([]) ->
-        Messages = []
+    % notmuch/devel/schemata: threadid
+    %
+:- pred parse_thread_id(json::in, thread_id::out) is semidet.
+
+parse_thread_id(Json, ThreadId) :-
+    Json = string(Str0),
+    Str = unescape(Str0),
+    Str \= "", % just in case
+    ThreadId = thread_id(Str).
+
+    % notmuch/devel/schemata: messageid
+    %
+:- pred parse_message_id(json::in, message_id::out) is semidet.
+
+parse_message_id(Json, MessageId) :-
+    Json = string(Str0),
+    Str = unescape(Str0),
+    Str \= "", % just in case
+    MessageId = message_id(Str).
+
+    % notmuch/devel/schemata: unix_time
+    % Number of seconds since the Epoch
+    %
+:- pred parse_unix_time(json::in, timestamp::out) is semidet.
+
+parse_unix_time(Json, Timestamp) :-
+    (
+        Json = int(Int),
+        % XXX At the time of writing, notmuch returns negative values for
+        % timestamps beyond Y2038 even on platforms where time_t is 64-bits.
+        Timestamp = timestamp(float(Int))
     ;
-        notmuch_json_error
+        Json = integer(Integer),
+        % Convert directly to float in case int is 32-bits.
+        % This case is currently unreachable in practice.
+        Str = integer.to_string(Integer),
+        string.to_float(Str, Float),
+        Timestamp = timestamp(Float)
     ).
 
-parse_top_message(JSON, Message) :-
-    parse_message_details(no, JSON, [], Message).
+%-----------------------------------------------------------------------------%
 
-:- pred parse_inner_message_list(maybe(set(tag))::in, json::in,
-    list(message)::out) is det.
-
-parse_inner_message_list(CustomExcludeTags, JSON, Messages) :-
-    ( JSON = list(Array) ->
-        list.map(parse_message(CustomExcludeTags), Array, Messagess),
-        list.condense(Messagess, Messages)
+    % notmuch/devel/schemata: thread_set
+    % A top-level set of threads (do_show)
+    % Returned by notmuch show without a --part argument
+    %
+parse_thread_set(CustomExcludeTags, JSON, Messages) :-
+    ( JSON = list(List) ->
+        list.map(parse_thread(CustomExcludeTags), List, Messages0),
+        list.condense(Messages0, Messages)
     ;
-        notmuch_json_error
+        exception.throw(notmuch_json_error("parse_thread_set: expected list"))
     ).
 
-:- pred parse_message(maybe(set(tag))::in, json::in, list(message)::out)
+    % notmuch/devel/schemata: thread
+    % Top-level messages in a thread (show_messages)
+    %
+:- pred parse_thread(maybe(set(tag))::in, json::in, list(message)::out)
     is det.
 
-parse_message(CustomExcludeTags, JSON, Messages) :-
+parse_thread(CustomExcludeTags, JSON, Messages) :-
+    ( JSON = list(List) ->
+        list.map(parse_thread_node(CustomExcludeTags), List, Messages0),
+        list.filter_map(maybe_is_yes, Messages0, Messages)
+    ;
+        exception.throw(notmuch_json_error("parse_thread: expected list"))
+    ).
+
+    % notmuch/devel/schemata: thread_node
+    % A message and its replies (show_messages)
+    %
+:- pred parse_thread_node(maybe(set(tag))::in, json::in, maybe(message)::out)
+    is det.
+
+parse_thread_node(CustomExcludeTags, JSON, MaybeMessage) :-
     ( JSON = list([JSON1, JSON2]) ->
-        parse_inner_message_list(CustomExcludeTags, JSON2, Replies),
+        ( JSON2 = list(List2) ->
+            list.map(parse_thread_node(CustomExcludeTags), List2, Replies0),
+            list.filter_map(maybe_is_yes, Replies0, Replies)
+        ;
+            exception.throw(notmuch_json_error(
+                "parse_thread_node: expected replies list"))
+        ),
         ( JSON1 = null ->
             Message = excluded_message(no, no, no, no, Replies)
         ;
-            parse_message_details(CustomExcludeTags, JSON1, Replies, Message)
+            parse_message_maybe_exclude(CustomExcludeTags, JSON1, Replies,
+                Message)
         ),
         % Completely hide excluded messages without replies.
         ( Message = excluded_message(_, _, _, _, []) ->
-            Messages = []
+            MaybeMessage = no
         ;
-            Messages = [Message]
+            MaybeMessage = yes(Message)
         )
     ;
-        notmuch_json_error
+        exception.throw(notmuch_json_error(
+            "parse_thread_node: expected list (2 elements)"))
     ).
 
-:- pred parse_message_details(maybe(set(tag))::in, json::in,
+    % notmuch/devel/schemata: message
+    % A message (format_part_sprinter)
+    %
+parse_message(JSON, Message) :-
+    parse_message_maybe_exclude(no, JSON, [], Message).
+
+:- pred parse_message_maybe_exclude(maybe(set(tag))::in, json::in,
     list(message)::in, message::out) is det.
 
-parse_message_details(CustomExcludeTags, JSON, Replies, Message) :-
+parse_message_maybe_exclude(CustomExcludeTags, JSON, Replies, Message) :-
     parse_message_for_recall(JSON, Message0),
     Message0 = message_for_recall(MessageId, Timestamp, Headers, TagSet),
     (
+        % Not documented in notmuch/devel/schemata
         JSON/"excluded" = bool(yes),
         really_exclude_message(CustomExcludeTags, TagSet)
     ->
         Message = excluded_message(yes(MessageId), yes(Timestamp),
             yes(Headers), yes(TagSet), Replies)
     ;
-        parse_body(JSON, MessageId, Body),
-        Message = message(MessageId, Timestamp, Headers, TagSet, Body,
-            Replies)
+        ( JSON/"body" = list([BodyObj]) ->
+            IsDecrypted = not_decrypted,
+            parse_part(MessageId, IsDecrypted, BodyObj, Body)
+        ;
+            exception.throw(notmuch_json_error(
+                "parse_message_maybe_exclude: expected body"))
+        ),
+        Message = message(MessageId, Timestamp, Headers, TagSet, Body, Replies)
     ).
 
 :- pred really_exclude_message(maybe(set(tag))::in, set(tag)::in) is semidet.
@@ -227,28 +306,45 @@ really_exclude_message(CustomExcludeTags, MessageTags) :-
         set.member(Tag, MessageTags)
     ).
 
+    % Main part of 'message' in notmuch/devel/schemata
+    %
 parse_message_for_recall(JSON, Message) :-
     (
-        JSON/"id" = unesc_string(Id),
+        JSON/"id" = Id,
+        parse_message_id(Id, MessageId),
+        % match: bool,
+        % filename: [string*],
         JSON/"timestamp" = Timestamp0,
-        parse_timestamp(Timestamp0, Timestamp),
-        JSON/"headers" = map(HeaderMap),
-        map.foldl(parse_header, HeaderMap, init_headers, Headers),
+        parse_unix_time(Timestamp0, Timestamp),
+        % date_relative: string,
         JSON/"tags" = list(TagsList),
-        list.map(parse_tag, TagsList, Tags)
+        list.map(parse_tag, TagsList, Tags),
+
+        JSON/"headers" = map(HeaderMap),
+        parse_headers(HeaderMap, Headers)
+        % crypto: crypto,
+        % body?: [part]    # omitted if --body=false
     ->
-        MessageId = message_id(Id),
         TagSet = set.from_list(Tags),
         Message = message_for_recall(MessageId, Timestamp, Headers, TagSet)
     ;
-        notmuch_json_error
+        exception.throw(notmuch_json_error("parse_message_for_recall"))
     ).
+
+    % notmuch/devel/schemata: headers
+    % The headers of a message or part
+    %
+:- pred parse_headers(map(string, json)::in, headers::out) is semidet.
+
+parse_headers(Map, Headers) :-
+    map.foldl(parse_header, Map, init_headers, Headers).
 
 :- pred parse_header(string::in, json::in, headers::in, headers::out) is semidet.
 
 parse_header(Key, unesc_string(Value), !Headers) :-
-    ( Key = "Date" ->
-        !Headers ^ h_date := header_value(Value)
+    ( Key = "Subject" ->
+        % notmuch should provide the decoded value.
+        !Headers ^ h_subject := decoded_unstructured(Value)
     ; Key = "From" ->
         !Headers ^ h_from := header_value(Value)
     ; Key = "To" ->
@@ -257,11 +353,12 @@ parse_header(Key, unesc_string(Value), !Headers) :-
         !Headers ^ h_cc := header_value(Value)
     ; Key = "Bcc" ->
         !Headers ^ h_bcc := header_value(Value)
-    ; Key = "Subject" ->
-        % notmuch should provide the decoded value.
-        !Headers ^ h_subject := decoded_unstructured(Value)
     ; Key = "Reply-To" ->
         !Headers ^ h_replyto := header_value(Value)
+    ; Key = "Date" ->
+        !Headers ^ h_date := header_value(Value)
+
+    % The following are not listed in notmuch/devel/schemata
     ; Key = "In-Reply-To" ->
         !Headers ^ h_inreplyto := header_value(Value)
     ; Key = "References" ->
@@ -273,123 +370,150 @@ parse_header(Key, unesc_string(Value), !Headers) :-
         !Headers ^ h_rest := Rest
     ).
 
-:- pred parse_body(json::in, message_id::in, list(part)::out) is det.
-
-parse_body(JSON, MessageId, Body) :-
-    ( JSON/"body" = list(BodyList) ->
-        IsDecrypted = not_decrypted,
-        list.map(parse_part(MessageId, IsDecrypted), BodyList, Body)
-    ;
-        notmuch_json_error
-    ).
-
+    % notmuch/devel/schemata: part
+    % A MIME part (format_part_sprinter)
+    %
 parse_part(MessageId, IsDecrypted0, JSON, Part) :-
     (
-        % XXX notmuch/devel/schemata says id can be a string
-        JSON/"id" = int(PartId),
-        JSON/"content-type" = unesc_string(ContentTypeString)
+        JSON/"id" = Id,
+        parse_part_id(Id, PartId0)
     ->
-        ContentType = make_mime_type(ContentTypeString),
+        PartId = PartId0
+    ;
+        exception.throw(notmuch_json_error("parse_part: expected id"))
+    ),
+    ( JSON/"content-type" = unesc_string(ContentTypeString) ->
+        ContentType = make_mime_type(ContentTypeString)
+    ;
+        exception.throw(notmuch_json_error(
+            "parse_part: expected content-type"))
+    ),
+    ( JSON/"content-disposition" = unesc_string(Disposition) ->
+        MaybeContentDisposition = yes(content_disposition(Disposition))
+    ;
+        MaybeContentDisposition = no
+    ),
+    % content-id?: string,
+
+    ( mime_type.is_multipart(ContentType) ->
+        ( JSON/"content" = list(SubParts0) ->
+            ( ContentType = mime_type.multipart_encrypted ->
+                % XXX notmuch/devel/schemata does not limit encstatus
+                % to multipart/encrypted
+                ( JSON/"encstatus" = EncStatus ->
+                    ( parse_encstatus(EncStatus, Encryption0) ->
+                        Encryption = Encryption0
+                    ;
+                        exception.throw(notmuch_json_error(
+                            "parse_part: expected encstatus"))
+                    )
+                ;
+                    Encryption = encrypted
+                ),
+                % XXX use message.crypto instead?
+                (
+                    Encryption = decryption_good,
+                    IsDecrypted = is_decrypted
+                ;
+                    ( Encryption = encrypted
+                    ; Encryption = decryption_bad
+                    ; Encryption = not_encrypted % should not occur
+                    ),
+                    IsDecrypted = not_decrypted
+                )
+            ;
+                Encryption = not_encrypted,
+                IsDecrypted = IsDecrypted0
+            ),
+            % XXX notmuch/devel/schemata does not limit sigstatus to multipart
+            ( JSON/"sigstatus" = SigStatus ->
+                ( parse_sigstatus(SigStatus, Signatures0) ->
+                    Signatures = Signatures0
+                ;
+                    exception.throw(notmuch_json_error(
+                        "parse_part: expected sigstatus"))
+                )
+            ;
+                Signatures = []
+            ),
+            list.map(parse_part(MessageId, IsDecrypted), SubParts0, SubParts),
+            Content = subparts(Encryption, Signatures, SubParts),
+            MaybeContentCharset = no,
+            MaybeFilename = no,
+            MaybeContentLength = no,
+            MaybeContentTransferEncoding = no
+        ;
+            exception.throw(notmuch_json_error(
+                "parse_part: expected content for multipart"))
+        )
+    ; ContentType = mime_type.message_rfc822 ->
+        ( JSON/"content" = list([EncapMessageJson]) ->
+            parse_message_rfc822_content(MessageId, IsDecrypted0,
+                EncapMessageJson, EncapMessage),
+            Content = encapsulated_message(EncapMessage),
+            MaybeContentCharset = no,
+            MaybeFilename = no,
+            MaybeContentLength = no,
+            MaybeContentTransferEncoding = no,
+            IsDecrypted = IsDecrypted0
+        ;
+            exception.throw(notmuch_json_error(
+                "parse_part: expected content for message/rfc822"))
+        )
+    ;
+        % Leaf part.
+        ( JSON/"filename" = unesc_string(Filename) ->
+            MaybeFilename = yes(filename(Filename))
+        ;
+            MaybeFilename = no
+        ),
         ( JSON/"content-charset" = unesc_string(Charset) ->
             MaybeContentCharset = yes(content_charset(Charset))
         ;
             MaybeContentCharset = no
         ),
-        ( JSON/"content-disposition" = unesc_string(Disposition) ->
-            MaybeContentDisposition = yes(content_disposition(Disposition))
+
+        ( JSON/"content" = unesc_string(ContentString) ->
+            Content = text(ContentString)
         ;
-            MaybeContentDisposition = no
+            % A leaf part's body content is optional, but may be included if
+            % it can be correctly encoded as a string.
+            Content = unsupported
         ),
-        ( mime_type.is_multipart(ContentType) ->
-            ( JSON/"content" = list(SubParts0) ->
-                ( ContentType = mime_type.multipart_encrypted ->
-                    % XXX check for encstatus even for other content-types?
-                    ( JSON/"encstatus" = EncStatus ->
-                        ( parse_encstatus(EncStatus, Encryption0) ->
-                            Encryption = Encryption0
-                        ;
-                            notmuch_json_error
-                        )
-                    ;
-                        Encryption = encrypted
-                    ),
-                    (
-                        Encryption = decryption_good,
-                        IsDecrypted = is_decrypted
-                    ;
-                        ( Encryption = encrypted
-                        ; Encryption = decryption_bad
-                        ; Encryption = not_encrypted % should not occur
-                        ),
-                        IsDecrypted = not_decrypted
-                    )
-                ;
-                    Encryption = not_encrypted,
-                    IsDecrypted = IsDecrypted0
-                ),
-                ( JSON/"sigstatus" = SigStatus ->
-                    ( parse_sigstatus(SigStatus, Signatures0) ->
-                        Signatures = Signatures0
-                    ;
-                        notmuch_json_error
-                    )
-                ;
-                    Signatures = []
-                ),
-                list.map(parse_part(MessageId, IsDecrypted), SubParts0, SubParts),
-                Content = subparts(Encryption, Signatures, SubParts),
-                MaybeFilename = no,
-                MaybeContentLength = no,
-                MaybeContentTransferEncoding = no
-            ;
-                notmuch_json_error
-            )
-        ; ContentType = mime_type.message_rfc822 ->
-            ( JSON/"content" = list(List) ->
-                list.map(parse_encapsulated_message(MessageId, IsDecrypted0),
-                    List, EncapMessages),
-                Content = encapsulated_messages(EncapMessages),
-                MaybeFilename = no,
-                MaybeContentLength = no,
-                MaybeContentTransferEncoding = no,
-                IsDecrypted = IsDecrypted0
-            ;
-                notmuch_json_error
-            )
+        ( JSON/"content-length" = int(Length) ->
+            MaybeContentLength = yes(content_length(Length))
         ;
-            % Leaf part.
-            ( JSON/"content" = unesc_string(ContentString) ->
-                Content = text(ContentString)
-            ;
-                % "content" is unavailable for non-text parts.
-                % We can those by running notmuch show --part=N id:NNN
-                Content = unsupported
-            ),
-            ( JSON/"filename" = unesc_string(Filename) ->
-                MaybeFilename = yes(filename(Filename))
-            ;
-                MaybeFilename = no
-            ),
-            ( JSON/"content-length" = int(Length) ->
-                MaybeContentLength = yes(content_length(Length))
-            ;
-                MaybeContentLength = no
-            ),
-            ( JSON/"content-transfer-encoding" = unesc_string(Encoding) ->
-                MaybeContentTransferEncoding =
-                    yes(content_transfer_encoding(Encoding))
-            ;
-                MaybeContentTransferEncoding = no
-            ),
-            IsDecrypted = IsDecrypted0
+            MaybeContentLength = no
         ),
-        Part = part(MessageId, yes(PartId), ContentType, MaybeContentCharset,
-            MaybeContentDisposition, Content, MaybeFilename,
-            MaybeContentLength, MaybeContentTransferEncoding, IsDecrypted)
+        ( JSON/"content-transfer-encoding" = unesc_string(Encoding) ->
+            MaybeContentTransferEncoding =
+                yes(content_transfer_encoding(Encoding))
+        ;
+            MaybeContentTransferEncoding = no
+        ),
+        IsDecrypted = IsDecrypted0
+    ),
+
+    Part = part(MessageId, yes(PartId), ContentType, MaybeContentCharset,
+        MaybeContentDisposition, Content, MaybeFilename,
+        MaybeContentLength, MaybeContentTransferEncoding, IsDecrypted).
+
+:- pred parse_part_id(json::in, part_id::out) is semidet.
+
+parse_part_id(JSON, PartId) :-
+    (
+        JSON = int(Int),
+        PartId = part_id(Int)
     ;
-        notmuch_json_error
+        JSON = string(Str),
+        % notmuch/devel/schemata suggests part id can be a string,
+        % but currently it's actually always an int.
+        PartId = part_id_string(unescape(Str))
     ).
 
+    % notmuch/devel/schemata: encstatus
+    % Encryption status (format_part_sprinter)
+    %
 :- pred parse_encstatus(json::in, encryption::out) is semidet.
 
 parse_encstatus(JSON, Encryption) :-
@@ -403,18 +527,24 @@ parse_encstatus(JSON, Encryption) :-
         Encryption = decryption_bad
     ).
 
+    % notmuch/devel/schemata: sigstatus
+    % Signature status (format_part_sigstatus_sprinter)
+    %
 :- pred parse_sigstatus(json::in, list(signature)::out) is semidet.
 
 parse_sigstatus(JSON, Signatures) :-
     JSON = list(Objs),
     map(parse_signature, Objs, Signatures).
 
+    % notmuch/devel/schemata: signature
+    %
 :- pred parse_signature(json::in, signature::out) is semidet.
 
 parse_signature(JSON, Signature) :-
     JSON/"status" = unesc_string(Status0),
     (
-        Status0 = "none", % documented but not in the source code?
+        Status0 = "none",
+        % Was once documented though not used, undocumented in commit 9eacd7d3
         SigStatus = none
     ;
         Status0 = "good",
@@ -425,7 +555,7 @@ parse_signature(JSON, Signature) :-
         ),
         (
             Created0 = JSON/"created",
-            parse_timestamp(Created0, Created)
+            parse_unix_time(Created0, Created)
         ->
             MaybeCreated = yes(Created)
         ;
@@ -433,7 +563,7 @@ parse_signature(JSON, Signature) :-
         ),
         (
             Expires0 = JSON/"expires",
-            parse_timestamp(Expires0, Expires)
+            parse_unix_time(Expires0, Expires)
         ->
             MaybeExpires = yes(Expires)
         ;
@@ -464,56 +594,115 @@ parse_signature(JSON, Signature) :-
         ),
         SigStatus = not_good(Status1, MaybeKeyId)
     ),
-    ( JSON/"errors" = int(Errors0) ->
-        Errors = Errors0
+    ( JSON/"errors" = SigErrorsObj ->
+        ( SigErrorsObj = int(NumErrors) ->
+            SigErrors = sig_errors_v3(NumErrors)
+        ;
+            parse_sig_errors_v4(SigErrorsObj, SigErrorsV4),
+            SigErrors = sig_errors_v4(SigErrorsV4)
+        ),
+        MaybeSigErrors = yes(SigErrors)
     ;
-        Errors = 0
+        MaybeSigErrors = no
     ),
-    Signature = signature(SigStatus, Errors).
+    Signature = signature(SigStatus, MaybeSigErrors).
 
-:- pred parse_encapsulated_message(message_id::in, maybe_decrypted::in,
+    % notmuch/devel/schemata: sig_errors
+    %
+:- pred parse_sig_errors_v4(json::in, list(sig_error)::out) is semidet.
+
+parse_sig_errors_v4(JSON, Errors) :-
+    % Maybe should just accept any name we find?
+    Flags = [
+        "key-revoked",
+        "key-expired",
+        "sig-expired",
+        "key-missing",
+        "alt-unsupported",
+        "crl-missing",
+        "crl-too-old",
+        "bad-policy",
+        "sys-error",
+        "tofu-conflict"
+    ],
+    map(parse_sig_error(JSON), Flags, MaybeErrors),
+    filter_map(maybe_is_yes, MaybeErrors, Errors).
+
+:- pred parse_sig_error(json::in, string::in, maybe(sig_error)::out)
+    is semidet.
+
+parse_sig_error(JSON, Name, MaybeError) :-
+    ( JSON/Name = Value ->
+        Value = bool(Bool),
+        (
+            Bool = yes,
+            MaybeError = yes(sig_error(Name))
+        ;
+            Bool = no,
+            MaybeError = no
+        )
+    ;
+        MaybeError = no
+    ).
+
+    % The content of a 'part' when content-type is "message/rfc822"
+    %
+:- pred parse_message_rfc822_content(message_id::in, maybe_decrypted::in,
     json::in, encapsulated_message::out) is det.
 
-parse_encapsulated_message(MessageId, IsDecrypted0, JSON, EncapMessage) :-
+parse_message_rfc822_content(MessageId, IsDecrypted0, JSON, EncapMessage) :-
     (
         JSON/"headers" = map(HeaderMap),
-        map.foldl(parse_header, HeaderMap, init_headers, Headers),
-        JSON/"body" = list(BodyList),
-        list.map(parse_part(MessageId, IsDecrypted0), BodyList, Body)
+        parse_headers(HeaderMap, Headers0)
     ->
-        EncapMessage = encapsulated_message(Headers, Body)
+        Headers = Headers0
     ;
-        notmuch_json_error
-    ).
+        exception.throw(notmuch_json_error(
+            "parse_encapsulated_message: expected headers"))
+    ),
+    ( JSON/"body" = list([BodyObj]) ->
+        parse_part(MessageId, IsDecrypted0, BodyObj, Body)
+    ;
+        exception.throw(notmuch_json_error(
+            "parse_encapsulated_message: expected body"))
+    ),
+    EncapMessage = encapsulated_message(Headers, Body).
 
 %-----------------------------------------------------------------------------%
 
-parse_threads_list(Json, Threads) :-
+    % notmuch/devel/schemata: notmuch search --output=summary
+    %
+parse_search_summary(Json, Threads) :-
     ( Json = list(List) ->
-        list.map(parse_thread, List, Threads)
+        list.map(parse_thread_summary, List, Threads)
     ;
-        notmuch_json_error
+        exception.throw(notmuch_json_error(
+            "parse_search_summary: expected list"))
     ).
 
-:- pred parse_thread(json::in, thread::out) is det.
+    % notmuch/devel/schemata: thread_summary
+    %
+:- pred parse_thread_summary(json::in, thread::out) is det.
 
-parse_thread(Json, Thread) :-
+parse_thread_summary(Json, Thread) :-
     (
-        Json/"thread" = unesc_string(Id),
+        Json/"thread" = ThreadId0,
+        parse_thread_id(ThreadId0, ThreadId),
         Json/"timestamp" = Timestamp0,
+        parse_unix_time(Timestamp0, Timestamp),
+        % date_relative: string,
+        Json/"matched" = int(Matched),
+        Json/"total" = int(Total),
         Json/"authors" = unesc_string(Authors),
         Json/"subject" = unesc_string(Subject),
         Json/"tags" = list(TagsList),
-        Json/"matched" = int(Matched),
-        Json/"total" = int(Total),
-        parse_timestamp(Timestamp0, Timestamp),
         list.map(parse_tag, TagsList, Tags)
     ->
         TagSet = set.from_list(Tags),
-        Thread = thread(thread_id(Id), Timestamp, Authors, Subject, TagSet,
+        Thread = thread(ThreadId, Timestamp, Authors, Subject, TagSet,
             Matched, Total)
     ;
-        notmuch_json_error
+        exception.throw(notmuch_json_error("parse_thread_summary"))
     ).
 
 :- pred parse_tag(json::in, tag::out) is semidet.
@@ -523,29 +712,32 @@ parse_tag(Json, tag(Tag)) :-
 
 %-----------------------------------------------------------------------------%
 
-parse_message_id_list(JSON, MessageId) :-
+    % notmuch/devel/schemata: notmuch search --output=messages
+    %
+parse_search_messages(JSON, MessageId) :-
     (
         JSON = list(List),
         list.map(parse_message_id, List, MessageId0)
     ->
         MessageId = MessageId0
     ;
-        notmuch_json_error
+        exception.throw(notmuch_json_error(
+            "parse_search_messages: expected list"))
     ).
-
-:- pred parse_message_id(json::in, message_id::out) is semidet.
-
-parse_message_id(unesc_string(Id), message_id(Id)).
 
 %-----------------------------------------------------------------------------%
 
+    % Not documented in notmuch/devel/schemata
+    %
 parse_address_count_list(Json, AddressCounts) :-
     ( Json = list(List) ->
         list.map(parse_address_count, List, AddressCounts)
     ;
-        notmuch_json_error
+        exception.throw(notmuch_json_error("parse_address_count_list"))
     ).
 
+    % Not documented in notmuch/devel/schemata
+    %
 :- pred parse_address_count(json::in, pair(int, string)::out) is det.
 
 parse_address_count(Json, Result) :-
@@ -555,39 +747,23 @@ parse_address_count(Json, Result) :-
     ->
         Result = Count - NameAddr
     ;
-        notmuch_json_error
+        exception.throw(notmuch_json_error("parse_address_count"))
     ).
 
 %-----------------------------------------------------------------------------%
 
-:- pred parse_timestamp(json::in, timestamp::out) is semidet.
-
-parse_timestamp(Json, Timestamp) :-
-    (
-        Json = int(Int),
-        % XXX At the time of writing, notmuch returns negative values for
-        % timestamps beyond Y2038 even on platforms where time_t is 64-bits.
-        Timestamp = timestamp(float(Int))
-    ;
-        Json = integer(Integer),
-        % Convert directly to float in case int is 32-bits.
-        % This case is currently unreachable in practice.
-        Str = integer.to_string(Integer),
-        string.to_float(Str, Float),
-        Timestamp = timestamp(Float)
-    ).
-
-%-----------------------------------------------------------------------------%
-
+    % notmuch/devel/schemata: reply
+    %
 parse_reply(Json, Res) :-
-    % We only need the reply headers for now.
     (
         Json/"reply-headers" = ReplyHeadersJson,
         parse_reply_headers(ReplyHeadersJson, ReplyHeaders)
+        % original: message
     ->
         Res = ReplyHeaders
     ;
-        notmuch_json_error
+        exception.throw(notmuch_json_error(
+            "parse_reply expected reply-headers"))
     ).
 
 :- pred parse_reply_headers(json::in, reply_headers::out) is semidet.
@@ -628,11 +804,6 @@ map(Map) / Key = Value :-
 :- func unesc_string(string::out) = (json::in) is semidet.
 
 unesc_string(unescape(EscString)) = string(EscString).
-
-:- pred notmuch_json_error is erroneous.
-
-notmuch_json_error :-
-    error("notmuch_json_error").
 
 %-----------------------------------------------------------------------------%
 % vim: ft=mercury ts=4 sts=4 sw=4 et
