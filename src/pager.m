@@ -361,9 +361,9 @@ make_message_self_trees(Config, Cols, Message, NodeId, Trees, !Counter, !IO) :-
         HeaderTree = leaf(list.reverse(!.RevLines))
     ),
 
-    list.map_foldl3(make_part_tree(Config, Cols), Body, BodyTrees,
-        yes, _ElideInitialHeadLine, !Counter, !IO),
-    BodyTree = node(NodeId, BodyTrees, no),
+    make_part_tree(Config, Cols, Body, BodyTree0, yes, _ElideInitialHeadLine,
+        !Counter, !IO),
+    BodyTree = node(NodeId, [BodyTree0], no),
 
     Separators = leaf([
         message_separator,
@@ -520,12 +520,12 @@ make_part_tree_with_alts(Config, Cols, AltParts, Part, HandleUnsupported, Tree,
             )
         )
     ;
-        Content = encapsulated_messages(EncapMessages),
-        list.map_foldl2(make_encapsulated_message_tree(Config, Cols),
-            EncapMessages, SubTrees0, !Counter, !IO),
+        Content = encapsulated_message(EncapMessage),
+        make_encapsulated_message_tree(Config, Cols, EncapMessage, SubTree0,
+            !Counter, !IO),
         HeadLine = part_head(Part, AltParts,
             part_expanded(part_not_filtered), importance_normal),
-        SubTrees = [leaf([HeadLine]) | SubTrees0],
+        SubTrees = [leaf([HeadLine]), SubTree0],
         Tree = node(PartNodeId, SubTrees, yes),
         !:ElideInitialHeadLine = no
     ;
@@ -694,9 +694,9 @@ make_encapsulated_message_tree(Config, Cols, EncapMessage, Tree, !Counter, !IO)
         cons(blank_line, !RevLines),
         list.reverse(!.RevLines, HeaderLines)
     ),
-    list.map_foldl3(make_part_tree(Config, Cols), Body, PartTrees,
+    make_part_tree(Config, Cols, Body, BodyTree,
         yes, _ElideInitialHeadLine, !Counter, !IO),
-    SubTrees = [leaf(HeaderLines) | PartTrees],
+    SubTrees = [leaf(HeaderLines), BodyTree],
     PreBlank = no,
     Tree = node(NodeId, SubTrees, PreBlank).
 
@@ -1324,7 +1324,7 @@ get_highlighted_thing(Info, Thing) :-
         Line = start_of_message_header(Message, _, _),
         MessageId = Message ^ m_id,
         Subject = Message ^ m_headers ^ h_subject,
-        PartId = 0,
+        PartId = part_id(0),
         % Hmm.
         Part = part(MessageId, yes(PartId), mime_type.text_plain, no,
             no, unsupported, no, no, no, not_decrypted),
@@ -1827,7 +1827,7 @@ draw_pager_line(Attrs, Screen, Panel, Line, IsCursor, !IO) :-
         ),
         draw(Screen, Panel, Attr, "...", !IO)
     ;
-        Line = signature(signature(Status, Errors)),
+        Line = signature(signature(Status, MaybeSigErrors)),
         BodyAttr = GAttrs ^ field_body,
         GoodAttr = GAttrs ^ good_key,
         BadAttr = GAttrs ^ bad_key,
@@ -1889,11 +1889,16 @@ draw_pager_line(Attrs, Screen, Panel, Line, IsCursor, !IO) :-
                 draw(Screen, Panel, BodyAttr, "(no key id)", !IO)
             )
         ),
-        ( Errors > 0 ->
-            draw(Screen, Panel, BodyAttr, format(" (errors: %d)", [i(Errors)]),
-                !IO)
+        (
+            MaybeSigErrors = no
         ;
-            true
+            MaybeSigErrors = yes(sig_errors_v3(NumErrors)),
+            draw(Screen, Panel, BodyAttr,
+                format(" (errors: %d)", [i(NumErrors)]), !IO)
+        ;
+            MaybeSigErrors = yes(sig_errors_v4(SigErrors)),
+            draw(Screen, Panel, BodyAttr, ":", !IO),
+            foldl(draw_sig_error(Screen, Panel, BodyAttr), SigErrors, !IO)
         )
     ;
         Line = message_separator,
@@ -1948,7 +1953,7 @@ make_part_message_2(Part, HiddenParts, Expanded, Message) :-
         Content = subparts(EncStatus, Signatures, _)
     ;
         ( Content = text(_)
-        ; Content = encapsulated_messages(_)
+        ; Content = encapsulated_message(_)
         ; Content = unsupported
         ),
         EncStatus = not_encrypted,
@@ -1984,6 +1989,14 @@ make_part_message_2(Part, HiddenParts, Expanded, Message) :-
             Message = "z to show"
         )
     ).
+
+:- pred draw_sig_error(screen::in, vpanel::in, curs.attr::in,
+    sig_error::in, io::di, io::uo) is det.
+
+draw_sig_error(Screen, Panel, Attr, SigError, !IO) :-
+    SigError = sig_error(Name),
+    draw(Screen, Panel, Attr, " ", !IO),
+    draw(Screen, Panel, Attr, Name, !IO).
 
 %-----------------------------------------------------------------------------%
 % vim: ft=mercury ts=4 sts=4 sw=4 et

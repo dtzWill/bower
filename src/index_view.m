@@ -30,10 +30,10 @@
 :- import_module list.
 :- import_module map.
 :- import_module maybe.
-:- import_module require.
 :- import_module set.
 :- import_module string.
 :- import_module time.
+:- use_module require.
 
 :- import_module addressbook.
 :- import_module async.
@@ -248,7 +248,7 @@ search_terms_quiet(Config, Tokens, MaybeThreads, MessageUpdate, !IO) :-
         ["search", "--format=json", "--exclude=all" | LimitOption]
         ++ ["--", Terms],
         no_suspend_curses,
-        parse_threads_list, ResThreads, !IO),
+        parse_search_summary, ResThreads, !IO),
     ignore_sigint(no, !IO),
     (
         ResThreads = ok(Threads),
@@ -772,7 +772,7 @@ skip_to_unread(NumRows, MessageUpdate, !Info) :-
             MessageUpdate = set_warning("No unread messages.")
         )
     ;
-        unexpected($module, $pred, "no cursor")
+        require.unexpected($module, $pred, "no cursor")
     ),
     !Info ^ i_scrollable := Scrollable.
 
@@ -812,7 +812,7 @@ effect_thread_pager_changes(Effects, !Info, !IO) :-
         Config = !.Info ^ i_config,
         map.foldl(async_tag_messages(Config), TagGroups, !IO)
     ;
-        unexpected($module, $pred, "cursor not on expected line")
+        require.unexpected($module, $pred, "cursor not on expected line")
     ).
 
 %-----------------------------------------------------------------------------%
@@ -882,7 +882,7 @@ try_reply(Screen, ThreadId, RequireUnread, ReplyKind, Res, !Info, !IO) :-
     Config = !.Info ^ i_config,
     Crypto = !.Info ^ i_crypto,
     run_notmuch(Config, Args, no_suspend_curses,
-        parse_message_id_list, ListRes, !IO),
+        parse_search_messages, ListRes, !IO),
     (
         ListRes = ok(MessageIds),
         ( MessageIds = [MessageId] ->
@@ -942,7 +942,7 @@ addressbook_add(Screen, Info, !IO) :-
             "--", thread_id_to_search_term(ThreadId)
         ],
         run_notmuch(Config, Args, no_suspend_curses,
-            parse_message_id_list, ListRes, !IO),
+            parse_search_messages, ListRes, !IO),
         ( ListRes = ok([MessageId | _]) ->
             run_notmuch(Config,
                 [
@@ -950,7 +950,7 @@ addressbook_add(Screen, Info, !IO) :-
                     message_id_to_search_term(MessageId)
                 ],
                 no_suspend_curses,
-                parse_top_message, MessageRes, !IO),
+                parse_message, MessageRes, !IO),
             (
                 MessageRes = ok(Message),
                 From = Message ^ m_headers ^ h_from
@@ -1734,7 +1734,7 @@ refresh_index_line(Screen, ThreadId, !IndexInfo, !IO) :-
     run_notmuch(Config,
         ["search", "--format=json", "--exclude=all", "--", Term],
         no_suspend_curses,
-        parse_threads_list, Result, !IO),
+        parse_search_summary, Result, !IO),
     (
         Result = ok([Thread]),
         current_timestamp(Time, !IO),

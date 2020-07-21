@@ -48,10 +48,10 @@
 :- import_module float.
 :- import_module int.
 :- import_module parsing_utils.
-:- import_module require.
 :- import_module string.
 :- import_module time.
 :- import_module version_array.
+:- use_module require.
 
 :- import_module addressbook.
 :- import_module async.
@@ -341,7 +341,7 @@ get_thread_messages(Config, ThreadId, IncludeTags, Res, Messages, !IO) :-
             "--", thread_id_to_search_term(ThreadId)
         ],
         RedirectStderr, SuspendCurs,
-        parse_messages_list(yes(ExcludeTags)), ParseResult, !IO),
+        parse_thread_set(yes(ExcludeTags)), ParseResult, !IO),
     (
         ParseResult = ok(Messages),
         Res = ok
@@ -512,7 +512,7 @@ append_threaded_messages(Nowish, Above0, Below0, MaybeParentId,
                 Below1 = []
             )
         ;
-            unexpected($module, $pred, "empty cord")
+            require.unexpected($module, $pred, "empty cord")
         )
     ),
     ( not_blank_at_column(Below1, length(Above0)) ->
@@ -1936,8 +1936,11 @@ prompt_save_part(Screen, Part, MaybeSubject, !Info, !IO) :-
         MaybeSubject = no,
         MessageId = message_id(IdStr),
         (
-            MaybePartId = yes(PartId),
-            PartFilename = string.format("%s.part_%d", [s(IdStr), i(PartId)])
+            MaybePartId = yes(part_id(PartIdInt)),
+            PartFilename = string.format("%s.part_%d", [s(IdStr), i(PartIdInt)])
+        ;
+            MaybePartId = yes(part_id_string(PartIdStr)),
+            PartFilename = string.format("%s.part_%s", [s(IdStr), s(PartIdStr)])
         ;
             MaybePartId = no,
             PartFilename = IdStr ++ ".part"
@@ -1970,7 +1973,7 @@ prompt_save_part(Screen, Part, MaybeSubject, !Info, !IO) :-
                 Res, !IO),
             (
                 Res = ok,
-                ( MaybePartId = yes(0) ->
+                ( MaybePartId = yes(part_id(0)) ->
                     MessageUpdate = set_info("Message saved.")
                 ;
                     MessageUpdate = set_info("Attachment saved.")
@@ -2026,7 +2029,7 @@ make_save_part_initial_prompt(History, PartFilename, Initial) :-
         Initial = PrevDirName / PartFilename
     ).
 
-:- pred do_save_part(prog_config::in, message_id::in, maybe(int)::in,
+:- pred do_save_part(prog_config::in, message_id::in, maybe(part_id)::in,
     maybe_decrypted::in, string::in, maybe_error::out, io::di, io::uo) is det.
 
 do_save_part(Config, MessageId, MaybePartId, IsDecrypted, FileName, Res, !IO)
@@ -2036,7 +2039,7 @@ do_save_part(Config, MessageId, MaybePartId, IsDecrypted, FileName, Res, !IO)
         get_notmuch_command(Config, Notmuch),
         make_quoted_command(Notmuch, [
             "show", "--format=raw", decrypt_arg(IsDecrypted),
-            "--part=" ++ from_int(PartId),
+            part_id_to_part_option(PartId),
             "--", message_id_to_search_term(MessageId)
         ], no_redirect, redirect_output(FileName), Command),
         % Decryption may invoke pinentry-curses.
@@ -2388,7 +2391,7 @@ choose_toggle_action(Info, Action0, Action) :-
             (
                 ( Content = text(_)
                 ; Content = subparts(not_encrypted, _, _)
-                ; Content = encapsulated_messages(_)
+                ; Content = encapsulated_message(_)
                 ; Content = unsupported
                 ),
                 Action = Action0
@@ -2437,7 +2440,7 @@ decrypt_part(Screen, !Info, !IO) :-
     ),
     update_message(Screen, MessageUpdate, !IO).
 
-:- pred do_decrypt_part(screen::in, message_id::in, int::in,
+:- pred do_decrypt_part(screen::in, message_id::in, part_id::in,
     message_update::out, thread_pager_info::in, thread_pager_info::out,
     io::di, io::uo) is det.
 
@@ -2446,7 +2449,7 @@ do_decrypt_part(Screen, MessageId, PartId, MessageUpdate, !Info, !IO) :-
     run_notmuch(Config,
         [
             "show", "--format=json", "--decrypt",
-            "--part=" ++ from_int(PartId),
+            part_id_to_part_option(PartId),
             "--", message_id_to_search_term(MessageId)
         ],
         redirect_stderr("/dev/null"),
@@ -2459,7 +2462,7 @@ do_decrypt_part(Screen, MessageId, PartId, MessageUpdate, !Info, !IO) :-
             Content = subparts(EncStatus, _SigStatus, _SubParts)
         ;
             ( Content = text(_)
-            ; Content = encapsulated_messages(_)
+            ; Content = encapsulated_message(_)
             ; Content = unsupported
             ),
             % Should not happen.
@@ -2527,7 +2530,7 @@ do_verify_part(Screen, Part0, MessageUpdate, !Info, !IO) :-
             [
                 "show", "--format=json",
                 "--verify", decrypt_arg(IsDecrypted), % seems unlikely
-                "--part=" ++ from_int(PartId),
+                part_id_to_part_option(PartId),
                 "--", message_id_to_search_term(MessageId)
             ],
             redirect_stderr("/dev/null"),
@@ -2587,7 +2590,7 @@ post_verify_message_update(Content, MessageUpdate) :-
         )
     ;
         ( Content = text(_)
-        ; Content = encapsulated_messages(_)
+        ; Content = encapsulated_message(_)
         ; Content = unsupported
         ),
         MessageUpdate = set_warning("Unexpected content.")
@@ -2596,8 +2599,17 @@ post_verify_message_update(Content, MessageUpdate) :-
 :- pred good_signature(signature::in) is semidet.
 
 good_signature(Signature) :-
-    Signature = signature(Status, Errors),
-    Errors = 0,
+    Signature = signature(Status, MaybeSigErrors),
+    require_complete_switch [MaybeSigErrors]
+    (
+        MaybeSigErrors = no
+    ;
+        MaybeSigErrors = yes(sig_errors_v3(NumErrors)),
+        NumErrors = 0
+    ;
+        MaybeSigErrors = yes(sig_errors_v4(SigErrors)),
+        SigErrors = []
+    ),
     require_complete_switch [Status]
     (
         Status = good(_, _, _, _)

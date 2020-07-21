@@ -34,7 +34,7 @@
                 m_timestamp     :: timestamp,
                 m_headers       :: headers,
                 m_tags          :: set(tag),
-                m_body          :: list(part),
+                m_body          :: part,
                 m_replies       :: list(message)
             )
     ;       excluded_message(
@@ -62,8 +62,12 @@
 :- type message_id
     --->    message_id(string).
 
+:- type part_id
+    --->    part_id(int)
+    ;       part_id_string(string).
+
 :- type message_part_id
-    --->    message_part_id(message_id, int).   % XXX bespoke type for part_id
+    --->    message_part_id(message_id, part_id).
 
 :- type headers
     --->    headers(
@@ -110,7 +114,7 @@
 :- type part
     --->    part(
                 pt_msgid                :: message_id,
-                pt_part                 :: maybe(int), % XXX use bespoke type
+                pt_part                 :: maybe(part_id),
                 pt_content_type         :: mime_type,
                 pt_content_charset      :: maybe(content_charset),
                 pt_content_disposition  :: maybe(content_disposition),
@@ -124,7 +128,7 @@
 :- type part_content
     --->    text(string)
     ;       subparts(encryption, list(signature), list(part))
-    ;       encapsulated_messages(list(encapsulated_message))
+    ;       encapsulated_message(encapsulated_message)
     ;       unsupported.
 
 :- type encryption
@@ -136,7 +140,7 @@
 :- type signature
     --->    signature(
                 signature_status :: signature_status,
-                signature_errors :: int
+                signature_errors :: maybe(sig_errors)
             ).
 
 :- type signature_status
@@ -157,10 +161,17 @@
     ;       error
     ;       unknown.
 
+:- type sig_errors
+    --->    sig_errors_v3(int)
+    ;       sig_errors_v4(list(sig_error)).
+
+:- type sig_error
+    --->    sig_error(string).
+
 :- type encapsulated_message
     --->    encapsulated_message(
                 encap_headers   :: headers,
-                encap_body      :: list(part)
+                encap_body      :: part
             ).
 
 :- type maybe_decrypted
@@ -190,6 +201,8 @@
 :- func thread_id_to_search_term(thread_id) = string.
 
 :- func message_id_to_search_term(message_id) = string.
+
+:- func part_id_to_part_option(part_id) = string.
 
 :- func init_headers = headers.
 
@@ -222,6 +235,9 @@
 thread_id_to_search_term(thread_id(Id)) = "thread:" ++ Id.
 
 message_id_to_search_term(message_id(Id)) = "id:" ++ Id.
+
+part_id_to_part_option(part_id(Int)) = "--part=" ++ from_int(Int).
+part_id_to_part_option(part_id_string(Str)) = "--part=" ++ Str.
 
 init_headers = Headers :-
     Empty = header_value(""),
