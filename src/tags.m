@@ -150,6 +150,7 @@ display_tag_string(Tag, S) :-
     ; T = "sent" -> "📨"
     ; T = "Finance" -> "💲"
     ; T = "info" -> "ⓘ "
+    ; T = "lawn" -> "🌱"
     ; T
     )
   ;
