@@ -36,6 +36,16 @@
     ;       nothing
     ;       command(command_prefix).
 
+:- type thread_ordering
+    --->    thread_ordering_threaded
+    ;       thread_ordering_flat.
+
+:- type use_alt_html_filter
+    --->    alt_html_filter_never
+    ;       alt_html_filter_off
+    ;       alt_html_filter_on
+    ;       alt_html_filter_always.
+
 %-----------------------------------------------------------------------------%
 
 :- pred load_prog_config(load_prog_config_result::out, io::di, io::uo)
@@ -51,12 +61,20 @@
 
 :- pred get_pipe_id_command(prog_config::in, string::out) is det.
 
+:- pred get_alt_html_filter_command(prog_config::in,
+    maybe(command_prefix)::out) is det.
+
+:- pred get_use_alt_html_filter(prog_config::in, use_alt_html_filter::out)
+    is det.
+
 :- pred get_poll_notify_command(prog_config::in, maybe(command_prefix)::out)
     is det.
 
 :- pred get_poll_period_secs(prog_config::in, maybe(int)::out) is det.
 
 :- pred get_wrap_width(prog_config::in, int::in, int::out) is det.
+
+:- pred get_thread_ordering(prog_config::in, thread_ordering::out) is det.
 
 :- pred get_text_filter_command(prog_config::in, mime_type::in,
     command_prefix::out) is semidet.
@@ -130,9 +148,12 @@
                 open_part       :: string, % not shell-quoted
                 open_url        :: string, % not shell-quoted
                 pipe_id         :: string, % not shell-quoted
+                alt_html_filter :: maybe(command_prefix),
+                use_alt_html_filter :: use_alt_html_filter,
                 poll_notify     :: maybe(command_prefix),
                 poll_period_secs :: maybe(int),
                 wrap_width      :: maybe(int),
+                thread_ordering :: thread_ordering,
                 encrypt_by_default :: bool,
                 sign_by_default :: bool,
                 decrypt_by_default :: bool,
@@ -247,6 +268,38 @@ make_prog_config(Config, ProgConfig, NotmuchConfig, !Errors, !IO) :-
         PipeId = default_pipe_id_command
     ),
 
+    ( search_config(Config, "command", "alt_html_filter", AltHtmlFilter0) ->
+        ( AltHtmlFilter0 \= "" ->
+            parse_command(AltHtmlFilter0, AltHtmlFilter1, !Errors),
+            AltHtmlFilter = yes(AltHtmlFilter1)
+        ;
+            AltHtmlFilter = no
+        )
+    ;
+        AltHtmlFilter = yes(default_alt_html_filter_command)
+    ),
+
+    (
+        search_config(Config, "command", "use_alt_html_filter",
+            UseAltHtmlFilter0),
+        UseAltHtmlFilter1 = string.to_lower(UseAltHtmlFilter0),
+        (
+            UseAltHtmlFilter1 = "never",
+            UseAltHtmlFilter = alt_html_filter_never
+        ;
+            UseAltHtmlFilter1 = "manual",
+            UseAltHtmlFilter = alt_html_filter_off
+        ;
+            UseAltHtmlFilter1 = "default",
+            UseAltHtmlFilter = alt_html_filter_on
+        ;
+            UseAltHtmlFilter1 = "always",
+            UseAltHtmlFilter = alt_html_filter_always
+        )
+    ;
+        UseAltHtmlFilter = alt_html_filter_off
+    ),
+
     (
         search_config(Config, "command", "poll_notify", PollNotify0),
         PollNotify0 \= ""
@@ -274,6 +327,15 @@ make_prog_config(Config, ProgConfig, NotmuchConfig, !Errors, !IO) :-
         WrapWidth = yes(WrapWidthInt)
     ;
         WrapWidth = no
+    ),
+
+    (
+        search_config(Config, "ui", "thread_ordering", Ordering0),
+        Ordering0 = "flat"
+    ->
+        Ordering = thread_ordering_flat
+    ;
+        Ordering = thread_ordering_threaded
     ),
 
     some [!Filters] (
@@ -388,9 +450,12 @@ make_prog_config(Config, ProgConfig, NotmuchConfig, !Errors, !IO) :-
     ProgConfig ^ open_part = OpenPart,
     ProgConfig ^ open_url = OpenUrl,
     ProgConfig ^ pipe_id = PipeId,
+    ProgConfig ^ alt_html_filter = AltHtmlFilter,
+    ProgConfig ^ use_alt_html_filter = UseAltHtmlFilter,
     ProgConfig ^ poll_notify = PollNotify,
     ProgConfig ^ poll_period_secs = PollSecs,
     ProgConfig ^ wrap_width = WrapWidth,
+    ProgConfig ^ thread_ordering = Ordering,
     ProgConfig ^ text_filters = Filters,
     ProgConfig ^ encrypt_by_default = EncryptByDefault,
     ProgConfig ^ sign_by_default = SignByDefault,
@@ -761,6 +826,12 @@ get_open_url_command(Config, Command) :-
 get_pipe_id_command(Config, Command) :-
     Command = Config ^ pipe_id.
 
+get_alt_html_filter_command(Config, Command) :-
+    Command = Config ^ alt_html_filter.
+
+get_use_alt_html_filter(Config, UseAltHtmlFilter) :-
+    UseAltHtmlFilter = Config ^ use_alt_html_filter.
+
 get_poll_notify_command(Config, Command) :-
     Command = Config ^ poll_notify.
 
@@ -776,6 +847,9 @@ get_wrap_width(Config, Cols, WrapWidth) :-
         MaybeWrapWidth = no,
         WrapWidth = Cols
     ).
+
+get_thread_ordering(Config, Ordering) :-
+    Ordering = Config ^ thread_ordering.
 
 get_text_filter_command(Config, MimeType, Command) :-
     Filters = Config ^ text_filters,
@@ -896,6 +970,11 @@ default_open_url_command = "xdg-open&".
 :- func default_pipe_id_command = string.
 
 default_pipe_id_command = "xclip".
+
+:- func default_alt_html_filter_command = command_prefix.
+
+default_alt_html_filter_command =
+    command_prefix(shell_quoted("pandoc -f markdown -t html"), quote_once).
 
 :- func default_poll_period_secs = maybe(int).
 

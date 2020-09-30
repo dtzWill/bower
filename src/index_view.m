@@ -38,6 +38,7 @@
 :- import_module addressbook.
 :- import_module async.
 :- import_module callout.
+:- import_module char_util.
 :- import_module color.
 :- import_module compose.
 :- import_module cord_util.
@@ -117,13 +118,14 @@
     ;       enter
     ;       enter_limit
     ;       enter_limit_tilde
+    ;       limit_alias_char(char)
     ;       refresh_all
     ;       start_compose
     ;       start_recall
     ;       start_reply(reply_kind)
     ;       addressbook_add
     ;       prompt_internal_search(search_direction)
-    ;       skip_to_internal_search
+    ;       skip_to_internal_search(rel_search_direction)
     ;       toggle_unread
     ;       toggle_archive
     ;       toggle_flagged
@@ -144,6 +146,7 @@
     ;       resize
     ;       open_pager(thread_id, set(tag))
     ;       enter_limit(maybe(string))
+    ;       limit_alias_char(char)
     ;       refresh_all
     ;       start_compose
     ;       start_recall
@@ -159,6 +162,10 @@
     ;       bulk_tag(keep_selection)
     ;       pipe_thread_id
     ;       quit.
+
+:- type rel_search_direction
+    --->    prevailing_dir
+    ;       opposite_dir.
 
 :- type keep_selection
     --->    clear_selection
@@ -183,18 +190,18 @@
 
 %-----------------------------------------------------------------------------%
 
-open_index(Config, NotmuchConfig, Crypto, Screen, SearchString,
+open_index(Config, NotmuchConfig, Crypto, Screen, LimitString,
         !.CommonHistory, !IO) :-
     current_timestamp(Time, !IO),
-    ( SearchString = "" ->
+    ( LimitString = "" ->
         SearchTokens = [],
         Threads = []
     ;
-        predigest_search_string(Config, yes(NotmuchConfig), SearchString,
+        predigest_search_string(Config, yes(NotmuchConfig), LimitString,
             ParseRes, !IO),
         (
             ParseRes = ok(SearchTokens),
-            search_terms_with_progress(Config, Screen, SearchTokens,
+            search_terms_with_progress(Config, Screen, no, SearchTokens,
                 MaybeThreads, !IO)
         ;
             ParseRes = error(Error),
@@ -209,7 +216,7 @@ open_index(Config, NotmuchConfig, Crypto, Screen, SearchString,
             Threads = []
         ),
         LimitHistory0 = !.CommonHistory ^ ch_limit_history,
-        add_history_nodup(SearchString, LimitHistory0, LimitHistory),
+        add_history_nodup(LimitString, LimitHistory0, LimitHistory),
         !CommonHistory ^ ch_limit_history := LimitHistory
     ),
     setup_index_scrollable(Time, Threads, Scrollable, !IO),
@@ -217,17 +224,54 @@ open_index(Config, NotmuchConfig, Crypto, Screen, SearchString,
     NextPollTime = next_poll_time(Config, Time),
     PollCount = 0,
     MaybeSearch = no,
-    IndexInfo = index_info(Config, Crypto, Scrollable, SearchString,
+    IndexInfo = index_info(Config, Crypto, Scrollable, LimitString,
         SearchTokens, SearchTime, NextPollTime, PollCount, MaybeSearch,
         dir_forward, show_authors, show_square_brackets, !.CommonHistory),
     index_loop(Screen, redraw, IndexInfo, !IO).
 
-:- pred search_terms_with_progress(prog_config::in, screen::in,
-    list(token)::in, maybe(list(thread))::out, io::di, io::uo) is det.
+:- pred search_new_limit_string(screen::in, string::in, maybe(string)::in,
+    index_info::in, index_info::out, io::di, io::uo) is det.
 
-search_terms_with_progress(Config, Screen, Tokens, MaybeThreads, !IO) :-
+search_new_limit_string(Screen, LimitString, MaybeDesc, !IndexInfo, !IO) :-
+    Config = !.IndexInfo ^ i_config,
+    current_timestamp(Time, !IO),
+    predigest_search_string(Config, no, LimitString, ParseRes, !IO),
+    (
+        ParseRes = ok(Tokens),
+        search_terms_with_progress(Config, Screen, MaybeDesc, Tokens,
+            MaybeThreads, !IO),
+        (
+            MaybeThreads = yes(Threads),
+            setup_index_scrollable(Time, Threads, Scrollable, !IO),
+            !IndexInfo ^ i_scrollable := Scrollable,
+            !IndexInfo ^ i_search_terms := LimitString,
+            !IndexInfo ^ i_search_tokens := Tokens,
+            !IndexInfo ^ i_search_time := Time,
+            !IndexInfo ^ i_next_poll_time := next_poll_time(Config, Time),
+            !IndexInfo ^ i_poll_count := 0
+        ;
+            MaybeThreads = no
+        )
+    ;
+        ParseRes = error(Error),
+        update_message(Screen, set_warning(Error), !IO)
+    ).
+
+:- pred search_terms_with_progress(prog_config::in, screen::in,
+    maybe(string)::in, list(token)::in, maybe(list(thread))::out,
+    io::di, io::uo) is det.
+
+search_terms_with_progress(Config, Screen, MaybeDesc, Tokens, MaybeThreads,
+        !IO) :-
     flush_async_with_progress(Screen, !IO),
-    update_message_immed(Screen, set_info("Searching..."), !IO),
+    (
+        MaybeDesc = no,
+        Message = "Searching..."
+    ;
+        MaybeDesc = yes(Desc),
+        Message = "Searching " ++ Desc ++ "..."
+    ),
+    update_message_immed(Screen, set_info(Message), !IO),
     search_terms_quiet(Config, Tokens, MaybeThreads, MessageUpdate, !IO),
     update_message(Screen, MessageUpdate, !IO).
 
@@ -390,33 +434,17 @@ index_loop(Screen, OnEntry, !.IndexInfo, !IO) :-
             Return = yes(LimitString),
             add_history_nodup(LimitString, History0, History),
             !IndexInfo ^ i_common_history ^ ch_limit_history := History,
-            current_timestamp(Time, !IO),
-            predigest_search_string(Config, no, LimitString, ParseRes, !IO),
-            (
-                ParseRes = ok(Tokens),
-                search_terms_with_progress(Config, Screen, Tokens,
-                    MaybeThreads, !IO),
-                (
-                    MaybeThreads = yes(Threads),
-                    setup_index_scrollable(Time, Threads, Scrollable, !IO),
-                    !IndexInfo ^ i_scrollable := Scrollable,
-                    !IndexInfo ^ i_search_terms := LimitString,
-                    !IndexInfo ^ i_search_tokens := Tokens,
-                    !IndexInfo ^ i_search_time := Time,
-                    !IndexInfo ^ i_next_poll_time :=
-                        next_poll_time(Config, Time),
-                    !IndexInfo ^ i_poll_count := 0
-                ;
-                    MaybeThreads = no
-                )
-            ;
-                ParseRes = error(Error),
-                update_message(Screen, set_warning(Error), !IO)
-            )
+            search_new_limit_string(Screen, LimitString, no, !IndexInfo, !IO)
         ;
             Return = no,
             update_message(Screen, clear_message, !IO)
         ),
+        index_loop(Screen, redraw, !.IndexInfo, !IO)
+    ;
+        Action = limit_alias_char(Char),
+        LimitString = "~" ++ string.from_char(Char),
+        search_new_limit_string(Screen, LimitString, yes(LimitString),
+            !IndexInfo, !IO),
         index_loop(Screen, redraw, !.IndexInfo, !IO)
     ;
         Action = refresh_all,
@@ -427,14 +455,10 @@ index_loop(Screen, OnEntry, !.IndexInfo, !IO) :-
         flush_async_with_progress(Screen, !IO),
         Config = !.IndexInfo ^ i_config,
         Crypto = !.IndexInfo ^ i_crypto,
-        CommonHistory0 = !.IndexInfo ^ i_common_history,
-        ToHistory0 = CommonHistory0 ^ ch_to_history,
-        SubjectHistory0 = CommonHistory0 ^ ch_subject_history,
-        start_compose(Config, Crypto, Screen, Transition,
-            ToHistory0, ToHistory, SubjectHistory0, SubjectHistory, !IO),
-        CommonHistory1 = CommonHistory0 ^ ch_to_history := ToHistory,
-        CommonHistory = CommonHistory1 ^ ch_subject_history := SubjectHistory,
-        !IndexInfo ^ i_common_history := CommonHistory,
+        History0 = !.IndexInfo ^ i_common_history,
+        start_compose(Config, Crypto, Screen, Transition, History0, History,
+            !IO),
+        !IndexInfo ^ i_common_history := History,
         handle_screen_transition(Screen, Transition, Sent, !IndexInfo, !IO),
         (
             Sent = sent,
@@ -580,6 +604,10 @@ index_view_input(NumRows, KeyCode, MessageUpdate, Action, !IndexInfo) :-
             MessageUpdate = no_change,
             Action = enter_limit(yes("~"))
         ;
+            Binding = limit_alias_char(Char),
+            MessageUpdate = no_change,
+            Action = limit_alias_char(Char)
+        ;
             Binding = refresh_all,
             MessageUpdate = no_change,
             Action = refresh_all
@@ -604,8 +632,9 @@ index_view_input(NumRows, KeyCode, MessageUpdate, Action, !IndexInfo) :-
             MessageUpdate = no_change,
             Action = prompt_internal_search(SearchDir)
         ;
-            Binding = skip_to_internal_search,
-            skip_to_internal_search(NumRows, MessageUpdate, !IndexInfo),
+            Binding = skip_to_internal_search(RelSearchDir),
+            skip_to_internal_search(NumRows, RelSearchDir, MessageUpdate,
+                !IndexInfo),
             Action = continue
         ;
             Binding = toggle_unread,
@@ -691,6 +720,10 @@ key_binding(code(Code), Binding) :-
     ;
         fail
     ).
+key_binding(meta(Char), Binding) :-
+    % Prevent Alt-Backspace, etc.
+    is_printable(Char),
+    Binding = limit_alias_char(Char).
 
 :- pred key_binding_char(char::in, binding::out) is semidet.
 
@@ -714,8 +747,9 @@ key_binding_char('R', start_recall).
 key_binding_char('@', addressbook_add).
 key_binding_char('/', prompt_internal_search(dir_forward)).
 key_binding_char('?', prompt_internal_search(dir_reverse)).
-key_binding_char('n', skip_to_internal_search).
-key_binding_char('N', toggle_unread).
+key_binding_char('n', skip_to_internal_search(prevailing_dir)).
+key_binding_char('N', skip_to_internal_search(opposite_dir)).
+key_binding_char('U', toggle_unread).
 key_binding_char('a', toggle_archive).
 key_binding_char('F', toggle_flagged).
 key_binding_char('d', set_deleted).
@@ -886,8 +920,10 @@ try_reply(Screen, ThreadId, RequireUnread, ReplyKind, Res, !Info, !IO) :-
     (
         ListRes = ok(MessageIds),
         ( MessageIds = [MessageId] ->
+            History0 = !.Info ^ i_common_history,
             start_reply_to_message_id(Config, Crypto, Screen, MessageId,
-                ReplyKind, Transition, !IO),
+                ReplyKind, Transition, History0, History, !IO),
+            !Info ^ i_common_history := History,
             handle_screen_transition(Screen, Transition, Sent, !Info, !IO),
             Res = ok(Sent)
         ;
@@ -907,6 +943,7 @@ try_reply(Screen, ThreadId, RequireUnread, ReplyKind, Res, !Info, !IO) :-
 handle_recall(Screen, Sent, !IndexInfo, !IO) :-
     Config = !.IndexInfo ^ i_config,
     Crypto = !.IndexInfo ^ i_crypto,
+    History0 = !.IndexInfo ^ i_common_history,
     select_recall(Config, Screen, no, TransitionA, !IO),
     handle_screen_transition(Screen, TransitionA, MaybeSelected,
         !IndexInfo, !IO),
@@ -916,7 +953,9 @@ handle_recall(Screen, Sent, !IndexInfo, !IO) :-
             Message = message(_, _, _, _, _, _),
             PartVisibilityMap = map.init,
             continue_from_message(Config, Crypto, Screen, postponed_message,
-                Message, PartVisibilityMap, TransitionB, !IO),
+                Message, PartVisibilityMap, TransitionB, History0, History,
+                !IO),
+            !IndexInfo ^ i_common_history := History,
             handle_screen_transition(Screen, TransitionB, Sent, !IndexInfo,
                 !IO)
         ;
@@ -985,21 +1024,29 @@ prompt_internal_search(Screen, SearchDir, !Info, !IO) :-
             !Info ^ i_internal_search_dir := SearchDir,
             !Info ^ i_common_history ^ ch_internal_search_history := History,
             get_main_rows(Screen, NumRows, !IO),
-            skip_to_internal_search(NumRows, MessageUpdate, !Info),
+            skip_to_internal_search(NumRows, prevailing_dir, MessageUpdate,
+                !Info),
             update_message(Screen, MessageUpdate, !IO)
         )
     ;
         Return = no
     ).
 
-:- pred skip_to_internal_search(int::in, message_update::out,
-    index_info::in, index_info::out) is det.
+:- pred skip_to_internal_search(int::in, rel_search_direction::in,
+    message_update::out, index_info::in, index_info::out) is det.
 
-skip_to_internal_search(NumRows, MessageUpdate, !Info) :-
+skip_to_internal_search(NumRows, RelSearchDir, MessageUpdate, !Info) :-
     MaybeSearch = !.Info ^ i_internal_search,
     (
         MaybeSearch = yes(Search),
-        SearchDir = !.Info ^ i_internal_search_dir,
+        SearchDir0 = !.Info ^ i_internal_search_dir,
+        (
+            RelSearchDir = prevailing_dir,
+            SearchDir = SearchDir0
+        ;
+            RelSearchDir = opposite_dir,
+            SearchDir = opposite_search_direction(SearchDir0)
+        ),
         Scrollable0 = !.Info ^ i_scrollable,
         ( get_cursor(Scrollable0, Cursor0) ->
             (
@@ -1666,8 +1713,8 @@ refresh_all(Screen, Verbose, !Info, !IO) :-
         ParseRes = ok(Tokens),
         (
             Verbose = verbose,
-            search_terms_with_progress(Config, Screen, Tokens, MaybeThreads,
-                !IO)
+            search_terms_with_progress(Config, Screen, no, Tokens,
+                MaybeThreads, !IO)
         ;
             Verbose = quiet,
             search_terms_quiet(Config, Tokens, MaybeThreads, _MessageUpdate,

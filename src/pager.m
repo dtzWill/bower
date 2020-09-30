@@ -13,6 +13,7 @@
 :- import_module prog_config.
 :- import_module screen.
 :- import_module scrollable.
+:- import_module view_common.
 
 %-----------------------------------------------------------------------------%
 
@@ -30,14 +31,18 @@
     list(message)::in, pager_info::out, io::di, io::uo) is det.
 
 :- pred setup_pager_for_staging(prog_config::in, int::in, string::in,
-    retain_pager_pos::in, pager_info::out) is det.
+    maybe(string)::in, retain_pager_pos::in, pager_info::out, io::di,
+    io::uo) is det.
 
 :- type pager_action
     --->    continue
-    ;       leave_pager.
+    ;       decrypt_part
+    ;       redraw
+    ;       press_key_to_delete(string).
 
-:- pred pager_input(int::in, keycode::in, pager_action::out,
-    message_update::out, pager_info::in, pager_info::out) is det.
+:- pred pager_input(screen::in, int::in, keycode::in, pager_action::out,
+    message_update::out, pager_info::in, pager_info::out,
+    common_history::in, common_history::out, io::di, io::uo) is det.
 
 :- pred scroll(int::in, int::in, message_update::out,
     pager_info::in, pager_info::out) is det.
@@ -87,16 +92,24 @@
 :- pred get_highlighted_thing(pager_info::in, highlighted_thing::out)
     is semidet.
 
-:- pred replace_node_under_cursor(prog_config::in, int::in, int::in, part::in,
+:- pred replace_node_under_cursor(int::in, int::in, part::in,
     pager_info::in, pager_info::out, io::di, io::uo) is det.
 
 :- type toggle_type
     --->    cycle_alternatives
     ;       toggle_expanded.
 
-:- pred toggle_content(prog_config::in, toggle_type::in, int::in, int::in,
+:- pred toggle_content(toggle_type::in, int::in, int::in,
     message_update::out, pager_info::in, pager_info::out, io::di, io::uo)
     is det.
+
+:- type toggle_action
+    --->    toggle(toggle_type)
+    ;       decrypt_part
+    ;       do_nothing.
+
+:- pred choose_toggle_action(pager_info::in, toggle_type::in,
+    toggle_action::out) is det.
 
 :- pred get_percent_visible(pager_info::in, int::in, message_id::in, int::out)
     is semidet.
@@ -135,16 +148,27 @@
 :- import_module string_util.
 :- import_module time_util.
 
+:- import_module dir.
+:- import_module parsing_utils.
+:- import_module make_temp.
+:- import_module path_expand.
+:- import_module shell_word.
+:- import_module text_entry.
+
 :- use_module curs.
 
 %-----------------------------------------------------------------------------%
 
 :- type pager_info
     --->    pager_info(
+                p_config        :: prog_config,
                 p_tree          :: tree,
                 p_id_counter    :: counter,
                 p_scrollable    :: scrollable(id_pager_line),
-                p_extents       :: map(message_id, message_extents)
+                p_extents       :: map(message_id, message_extents),
+                p_last_blank    :: bool     % Introduced for compose view,
+                                            % allows to remove the initial
+                                            % blank line.
             ).
 
 :- type node_id
@@ -208,8 +232,7 @@
             ).
 
 :- type binding
-    --->    leave_pager
-    ;       scroll_down
+    --->    scroll_down
     ;       scroll_up
     ;       page_down
     ;       page_up
@@ -219,7 +242,12 @@
     ;       end
     ;       next_message
     ;       prev_message
-    ;       skip_quoted_text.
+    ;       skip_quoted_text
+    ;       highlight_minor
+    ;       cycle_alternatives
+    ;       toggle_expanded
+    ;       save_part
+    ;       open_part.
 
 %-----------------------------------------------------------------------------%
 
@@ -234,10 +262,10 @@ dummy_node_id = node_id(-1).
 
 %-----------------------------------------------------------------------------%
 
-:- func flatten(tree) = list(id_pager_line).
+:- func flatten(tree, bool) = list(id_pager_line).
 
-flatten(Tree) = list(Cord) :-
-    flatten(dummy_node_id, Tree, Cord, no, _LastBlank).
+flatten(Tree, LastBlank0) = list(Cord) :-
+    flatten(dummy_node_id, Tree, Cord, LastBlank0, _LastBlank).
 
 :- pred flatten(node_id::in, tree::in, cord(id_pager_line)::out,
     bool::in, bool::out) is det.
@@ -314,10 +342,10 @@ setup_pager(Config, Mode, Cols, Messages, Info, !IO) :-
     list.map_foldl2(make_message_tree(Config, Mode, Cols), Messages, Trees,
         Counter1, Counter, !IO),
     Tree = node(NodeId, Trees, no),
-    Flattened = flatten(Tree),
+    Flattened = flatten(Tree, no),
     Scrollable = scrollable.init(Flattened),
     make_extents(Flattened, Extents),
-    Info = pager_info(Tree, Counter, Scrollable, Extents).
+    Info = pager_info(Config, Tree, Counter, Scrollable, Extents, no).
 
 :- pred make_message_tree(prog_config::in, setup_mode::in, int::in,
     message::in, tree::out, counter::in, counter::out, io::di, io::uo) is det.
@@ -790,21 +818,44 @@ wrap_text(Text) = text(Text).
 
 %-----------------------------------------------------------------------------%
 
-setup_pager_for_staging(Config, Cols, Text, RetainPagerPos, Info) :-
-    get_wrap_width(Config, Cols, WrapWidth),
-    make_text_lines(WrapWidth, Text, Lines0),
-    Lines = wrap_texts(Lines0) ++ [
+setup_pager_for_staging(Config, Cols, Text, MaybeAltHtml, RetainPagerPos,
+        Info, !IO) :-
+    TextPlainPart = part(message_id(""), no, mime_type.text_plain, no,
+        yes(content_disposition("inline")), text(Text), no, no, no,
+        is_decrypted),
+    Separators = leaf([
         message_separator,
         message_separator,
         message_separator
-    ],
+    ]),
+    (
+        MaybeAltHtml = no,
+        Part = TextPlainPart,
+        LastBlank0 = yes
+    ;
+        MaybeAltHtml = yes(HtmlContent),
+        % TODO: Check if message_id("") and content_disposition("inline")
+        % have undesirable side effects !!!
+        TextHtmlPart = part(message_id(""), no, mime_type.text_html, no,
+            yes(content_disposition("inline")), text(HtmlContent), no, no, no,
+            is_decrypted),
+        MixedPart = part(message_id(""), no, mime_type.multipart_alternative,
+            no, yes(content_disposition("inline")), subparts(not_encrypted, [],
+            [TextPlainPart, TextHtmlPart]), no, no, no, is_decrypted),
+        Part = MixedPart,
+        LastBlank0 = no
+    ),
     counter.init(0, Counter0),
-    allocate_node_id(NodeId, Counter0, Counter),
-    Tree = node(NodeId, [leaf(Lines)], no),
-    Flattened = flatten(Tree),
+    make_part_tree(Config, Cols, Part, BodyTree0, yes,
+        _ElideInitialHeadLine, Counter0, Counter1, !IO),
+    allocate_node_id(NodeId, Counter1, Counter),
+    Tree = node(NodeId, [BodyTree0, Separators], no),
+
+    Flattened = flatten(Tree, LastBlank0),
     Scrollable0 = scrollable.init(Flattened),
     make_extents(Flattened, Extents0),
-    Info0 = pager_info(Tree, Counter, Scrollable0, Extents0),
+    Info0 = pager_info(Config, Tree, Counter, Scrollable0, Extents0,
+        LastBlank0),
     (
         RetainPagerPos = new_pager,
         Info = Info0
@@ -818,13 +869,10 @@ setup_pager_for_staging(Config, Cols, Text, RetainPagerPos, Info) :-
 
 %-----------------------------------------------------------------------------%
 
-pager_input(NumRows, KeyCode, Action, MessageUpdate, !Info) :-
+pager_input(Screen, NumRows, KeyCode, Action, MessageUpdate, !Info, !History,
+        !IO) :-
     ( key_binding(KeyCode, Binding) ->
         (
-            Binding = leave_pager,
-            Action = leave_pager,
-            MessageUpdate = clear_message
-        ;
             Binding = scroll_down,
             scroll(NumRows, 1, MessageUpdate, !Info),
             Action = continue
@@ -868,6 +916,40 @@ pager_input(NumRows, KeyCode, Action, MessageUpdate, !Info) :-
             Binding = skip_quoted_text,
             skip_quoted_text(MessageUpdate, !Info),
             Action = continue
+        ;
+            Binding = highlight_minor,
+            highlight_minor(NumRows, MessageUpdate, !Info),
+            Action = continue
+        ;
+            Binding = save_part,
+            save_part(Screen, Action, MessageUpdate, !Info, !History, !IO)
+        ;
+            Binding = open_part,
+            open_part(Screen, Action, MessageUpdate, !Info, !History, !IO)
+        ;
+            (
+                Binding = cycle_alternatives,
+                ToggleType0 = cycle_alternatives
+            ;
+                Binding = toggle_expanded,
+                ToggleType0 = toggle_expanded
+            ),
+            choose_toggle_action(!.Info, ToggleType0, ToggleAction),
+            (
+                ToggleAction = toggle(ToggleType),
+                get_cols(Screen, Cols, !IO),
+                toggle_content(ToggleType, NumRows, Cols, MessageUpdate,
+                    !Info, !IO),
+                Action = continue
+            ;
+                ToggleAction = decrypt_part,
+                Action = decrypt_part,
+                MessageUpdate = clear_message
+            ;
+                ToggleAction = do_nothing,
+                Action = continue,
+                MessageUpdate = clear_message
+            )
         )
     ;
         Action = continue,
@@ -883,9 +965,9 @@ key_binding(KeyCode, Binding) :-
     ;
         KeyCode = code(Code),
         ( Code = curs.key_down ->
-            Binding = scroll_down
+            Binding = next_message
         ; Code = curs.key_up ->
-            Binding = scroll_up
+            Binding = prev_message
         ; Code = curs.key_pagedown ->
             Binding = page_down
         ; Code = curs.key_pageup ->
@@ -901,7 +983,6 @@ key_binding(KeyCode, Binding) :-
 
 :- pred char_binding(char::in, binding::out) is semidet.
 
-char_binding('i', leave_pager).
 char_binding('\r', scroll_down).
 char_binding('\\', scroll_up).
 char_binding('\b', scroll_up).   % XXX doesn't work
@@ -912,6 +993,14 @@ char_binding('[', half_page_up).
 char_binding('j', next_message).
 char_binding('k', prev_message).
 char_binding('S', skip_quoted_text).
+char_binding('v', highlight_minor).
+char_binding('g', home).
+char_binding('G', end).
+char_binding('z', cycle_alternatives).
+char_binding('Z', toggle_expanded).
+char_binding('s', save_part).
+char_binding('w', save_part).
+char_binding('o', open_part).
 
 %-----------------------------------------------------------------------------%
 
@@ -1354,40 +1443,80 @@ get_highlighted_thing(Info, Thing) :-
 
 %-----------------------------------------------------------------------------%
 
-replace_node_under_cursor(Config, NumRows, Cols, Part, Info0, Info, !IO) :-
-    Info0 = pager_info(Tree0, Counter0, Scrollable0, _Extents0),
+replace_node_under_cursor(NumRows, Cols, Part, Info0, Info, !IO) :-
+    Info0 = pager_info(Config, Tree0, Counter0, Scrollable0, _Extents0,
+        LastBlank0),
     ( get_cursor_line(Scrollable0, _, NodeId - _Line) ->
         make_part_tree(Config, Cols, Part, NewNode, no, _ElideInitialHeadLine,
             Counter0, Counter, !IO),
         replace_node(NodeId, NewNode, Tree0, Tree),
-        Flattened = flatten(Tree),
+        Flattened = flatten(Tree, LastBlank0),
         scrollable.reinit(Flattened, NumRows, Scrollable0, Scrollable),
         make_extents(Flattened, Extents),
-        Info = pager_info(Tree, Counter, Scrollable, Extents)
+        Info = pager_info(Config, Tree, Counter, Scrollable, Extents,
+            LastBlank0)
     ;
         Info = Info0
     ).
 
 %-----------------------------------------------------------------------------%
 
-toggle_content(Config, ToggleType, NumRows, Cols, MessageUpdate, !Info, !IO) :-
+toggle_content(ToggleType, NumRows, Cols, MessageUpdate, !Info, !IO) :-
     Scrollable0 = !.Info ^ p_scrollable,
     ( get_cursor_line(Scrollable0, _Cursor, IdLine) ->
-        toggle_line(Config, ToggleType, NumRows, Cols, IdLine, MessageUpdate,
+        toggle_line(ToggleType, NumRows, Cols, IdLine, MessageUpdate,
             !Info, !IO)
     ;
         MessageUpdate = clear_message
     ).
 
-:- pred toggle_line(prog_config::in, toggle_type::in, int::in, int::in,
+choose_toggle_action(Info, ToggleType, Action) :-
+    ( get_highlighted_thing(Info, Thing) ->
+        (
+            Thing = highlighted_part(Part, _),
+            Content = Part ^ pt_content,
+            (
+                ( Content = text(_)
+                ; Content = subparts(not_encrypted, _, _)
+                ; Content = encapsulated_message(_)
+                ; Content = unsupported
+                ),
+                Action = toggle(ToggleType)
+            ;
+                Content = subparts(decryption_good, _, _),
+                Action = toggle(ToggleType)
+            ;
+                Content = subparts(encrypted, _, _),
+                Action = decrypt_part
+            ;
+                Content = subparts(decryption_bad, _, _),
+                Action = decrypt_part
+            )
+        ;
+            Thing = highlighted_url(_),
+            Action = do_nothing
+        ;
+            Thing = highlighted_fold_marker,
+            Action = toggle(ToggleType)
+        )
+    ;
+        Action = do_nothing
+    ).
+
+:- pred toggle_line(toggle_type::in, int::in, int::in,
     id_pager_line::in, message_update::out, pager_info::in, pager_info::out,
     io::di, io::uo) is det.
 
-toggle_line(Config, ToggleType, NumRows, Cols, NodeId - Line, MessageUpdate,
+toggle_line(ToggleType, NumRows, Cols, NodeId - Line, MessageUpdate,
         !Info, !IO) :-
     (
+        (
+            ToggleType = cycle_alternatives
+        ;
+            ToggleType = toggle_expanded
+        ),
         Line = part_head(_, _, _, _),
-        toggle_part(Config, ToggleType, NumRows, Cols, NodeId, Line,
+        toggle_part(ToggleType, NumRows, Cols, NodeId, Line,
             MessageUpdate, !Info, !IO)
     ;
         Line = fold_marker(_, _),
@@ -1406,11 +1535,11 @@ toggle_line(Config, ToggleType, NumRows, Cols, NodeId - Line, MessageUpdate,
 :- inst part_head
     --->    part_head(ground, ground, ground, ground).
 
-:- pred toggle_part(prog_config::in, toggle_type::in, int::in, int::in,
+:- pred toggle_part(toggle_type::in, int::in, int::in,
     node_id::in, pager_line::in(part_head), message_update::out,
     pager_info::in, pager_info::out, io::di, io::uo) is det.
 
-toggle_part(Config, ToggleType, NumRows, Cols, NodeId, Line, MessageUpdate,
+toggle_part(ToggleType, NumRows, Cols, NodeId, Line, MessageUpdate,
         Info0, Info, !IO) :-
     Line = part_head(Part0, HiddenParts0, Expanded0, _Importance0),
     (
@@ -1419,31 +1548,34 @@ toggle_part(Config, ToggleType, NumRows, Cols, NodeId, Line, MessageUpdate,
         HiddenParts0 = [Part | HiddenParts1]
     ->
         HiddenParts = HiddenParts1 ++ [Part0],
-        Info0 = pager_info(Tree0, Counter0, Scrollable0, _Extents0),
+        Info0 = pager_info(Config, Tree0, Counter0, Scrollable0, _Extents0,
+            LastBlank0),
         make_part_tree_with_alts(Config, Cols, HiddenParts, Part,
             expand_unsupported, NewNode, no, _ElideInitialHeadLine,
             Counter0, Counter, !IO),
         replace_node(NodeId, NewNode, Tree0, Tree),
-        Flattened = flatten(Tree),
+        Flattened = flatten(Tree, LastBlank0),
         scrollable.reinit(Flattened, NumRows, Scrollable0, Scrollable),
         make_extents(Flattened, Extents),
-        Info = pager_info(Tree, Counter, Scrollable, Extents),
+        Info = pager_info(Config, Tree, Counter, Scrollable, Extents,
+            LastBlank0),
         Type = mime_type.to_string(Part ^ pt_content_type),
         MessageUpdate = set_info("Showing " ++ Type ++ " alternative.")
     ;
         % Fallback.
-        toggle_part_expanded(Config, NumRows, Cols, NodeId, Line,
+        toggle_part_expanded(NumRows, Cols, NodeId, Line,
             MessageUpdate, Info0, Info, !IO)
     ).
 
-:- pred toggle_part_expanded(prog_config::in, int::in, int::in, node_id::in,
+:- pred toggle_part_expanded(int::in, int::in, node_id::in,
     pager_line::in(part_head), message_update::out,
     pager_info::in, pager_info::out, io::di, io::uo) is det.
 
-toggle_part_expanded(Config, NumRows, Cols, NodeId, Line0, MessageUpdate,
+toggle_part_expanded(NumRows, Cols, NodeId, Line0, MessageUpdate,
         Info0, Info, !IO) :-
     Line0 = part_head(Part, HiddenParts, WasExpanded, Importance),
-    Info0 = pager_info(Tree0, Counter0, Scrollable0, _Extents0),
+    Info0 = pager_info(Config, Tree0, Counter0, Scrollable0, _Extents0,
+        LastBlank0),
     (
         WasExpanded = part_not_expanded,
         MessageUpdate = set_info("Showing part."),
@@ -1459,10 +1591,11 @@ toggle_part_expanded(Config, NumRows, Cols, NodeId, Line0, MessageUpdate,
         replace_node(NodeId, NewNode, Tree0, Tree),
         Counter = Counter0
     ),
-    Flattened = flatten(Tree),
+    Flattened = flatten(Tree, LastBlank0),
     scrollable.reinit(Flattened, NumRows, Scrollable0, Scrollable),
     make_extents(Flattened, Extents),
-    Info = pager_info(Tree, Counter, Scrollable, Extents).
+    Info = pager_info(Config, Tree, Counter, Scrollable, Extents,
+        LastBlank0).
 
 :- inst fold_marker
     --->    fold_marker(ground, ground).
@@ -1483,12 +1616,14 @@ toggle_folding(NumRows, NodeId, Line, Info0, Info) :-
     ),
     NewNode = node(NodeId, [SubTree], no),
 
-    Info0 = pager_info(Tree0, Counter, Scrollable0, _Extents0),
+    Info0 = pager_info(Config, Tree0, Counter, Scrollable0, _Extents0,
+        LastBlank0),
     replace_node(NodeId, NewNode, Tree0, Tree),
-    Flattened = flatten(Tree),
+    Flattened = flatten(Tree, LastBlank0),
     scrollable.reinit(Flattened, NumRows, Scrollable0, Scrollable),
     make_extents(Flattened, Extents),
-    Info = pager_info(Tree, Counter, Scrollable, Extents).
+    Info = pager_info(Config, Tree, Counter, Scrollable, Extents,
+        LastBlank0).
 
 %-----------------------------------------------------------------------------%
 
@@ -1997,6 +2132,490 @@ draw_sig_error(Screen, Panel, Attr, SigError, !IO) :-
     SigError = sig_error(Name),
     draw(Screen, Panel, Attr, " ", !IO),
     draw(Screen, Panel, Attr, Name, !IO).
+
+%-----------------------------------------------------------------------------%
+
+:- func decrypt_arg(maybe_decrypted) = string.
+
+decrypt_arg(is_decrypted) = decrypt_arg_bool(yes).
+decrypt_arg(not_decrypted) = decrypt_arg_bool(no).
+
+:- func decrypt_arg_bool(bool) = string.
+
+decrypt_arg_bool(yes) = "--decrypt".
+decrypt_arg_bool(no) = "--decrypt=false".
+
+%-----------------------------------------------------------------------------%
+
+:- pred save_part(screen::in, pager_action::out, message_update::out,
+    pager_info::in, pager_info::out, common_history::in, common_history::out,
+    io::di, io::uo) is det.
+
+save_part(Screen, Action, MessageUpdate, !Info, !History, !IO) :-
+    ( get_highlighted_thing(!.Info, highlighted_part(Part, MaybeSubject)) ->
+        prompt_save_part(Screen, Part, MaybeSubject, !Info, !History, !IO),
+        MessageUpdate = no_change,
+        Action = redraw
+    ;
+        Action = continue,
+        MessageUpdate = set_warning("No message or attachment selected.")
+    ).
+
+:- pred prompt_save_part(screen::in, part::in, maybe(header_value)::in,
+    pager_info::in, pager_info::out, common_history::in, common_history::out,
+    io::di, io::uo) is det.
+
+prompt_save_part(Screen, Part, MaybeSubject, !Info, !History, !IO) :-
+    MessageId = Part ^ pt_msgid,
+    MaybePartId = Part ^ pt_part,
+    MaybePartFilename = Part ^ pt_filename,
+    (
+        MaybePartFilename = yes(filename(PartFilename))
+    ;
+        MaybePartFilename = no,
+        MaybeSubject = yes(Subject),
+        suggest_filename(header_value_string(Subject), PartFilename)
+    ;
+        MaybePartFilename = no,
+        MaybeSubject = no,
+        MessageId = message_id(IdStr),
+        (
+            MaybePartId = yes(part_id(PartIdInt)),
+            PartFilename0 = string.format("%s.part_%d", [s(IdStr), i(PartIdInt)])
+        ;
+            MaybePartId = yes(part_id_string(PartIdStr)),
+            PartFilename0 = string.format("%s.part_%s", [s(IdStr), s(PartIdStr)])
+        ;
+            MaybePartId = no,
+            ( IdStr \= "" ->
+                PartFilename0 = IdStr ++ ".part"
+            ;
+                PartFilename0 = "message.part"
+            )
+        ),
+        suggest_filename(PartFilename0, PartFilename)
+    ),
+    SaveHistory0 = !.History ^ ch_save_history,
+    make_save_part_initial_prompt(SaveHistory0, PartFilename, Initial),
+    get_home_dir(Home, !IO),
+    text_entry_initial(Screen, "Save to file: ", SaveHistory0, Initial,
+        complete_path(Home), Return, !IO),
+    (
+        Return = yes(FileName0),
+        FileName0 \= ""
+    ->
+        add_history_nodup(FileName0, SaveHistory0, SaveHistory),
+        !History ^ ch_save_history := SaveHistory,
+        expand_tilde_home(Home, FileName0, FileName),
+        FollowSymLinks = no,
+        io.file_type(FollowSymLinks, FileName, ResType, !IO),
+        (
+            ResType = ok(_),
+            % XXX prompt to overwrite
+            Error = FileName ++ " already exists.",
+            MessageUpdate = set_warning(Error)
+        ;
+            ResType = error(_),
+            % This assumes the file doesn't exist.
+            Config = !.Info ^ p_config,
+            do_save_part(Config, Part, FileName, Res, !IO),
+            (
+                Res = ok,
+                ( MaybePartId = yes(part_id(0)) ->
+                    MessageUpdate = set_info("Message saved.")
+                ;
+                    MessageUpdate = set_info("Attachment saved.")
+                )
+            ;
+                Res = error(Error),
+                MessageUpdate = set_warning(Error)
+            )
+        )
+    ;
+        MessageUpdate = clear_message
+    ),
+    update_message(Screen, MessageUpdate, !IO).
+
+:- pred suggest_filename(string::in, string::out) is det.
+
+suggest_filename(String0, String) :-
+    string.to_char_list(String0, CharList0),
+    list.filter_map(replace_filename_char, CharList0, CharList),
+    string.from_char_list(CharList, String).
+
+:- pred replace_filename_char(char::in, char::out) is semidet.
+
+replace_filename_char(C0, C) :-
+    (
+        ( char.is_alnum_or_underscore(C0)
+        ; C0 = ('+')
+        ; C0 = ('-')
+        ; C0 = ('.')
+        ; char.to_int(C0) >= 0x80
+        )
+    ->
+        C = C0
+    ;
+        ( C0 = (' ')
+        ; C0 = ('/')
+        ; C0 = ('\\')
+        ; C0 = (':')
+        ),
+        C = ('-')
+    ).
+
+:- pred make_save_part_initial_prompt(history::in, string::in, string::out)
+    is det.
+
+make_save_part_initial_prompt(History, PartFilename, Initial) :-
+    choose_text_initial(History, "", PrevFilename),
+    dir.dirname(PrevFilename, PrevDirName),
+    ( PrevDirName = "." ->
+        Initial = PartFilename
+    ;
+        Initial = PrevDirName / PartFilename
+    ).
+
+:- pred do_save_part(prog_config::in, part::in, string::in, maybe_error::out,
+    io::di, io::uo) is det.
+
+do_save_part(Config, Part, FileName, Res, !IO) :-
+    MessageId = Part ^ pt_msgid,
+    MaybePartId = Part ^ pt_part,
+    IsDecrypted = Part ^ pt_decrypted,
+    (
+        MaybePartId = yes(PartId),
+        get_notmuch_command(Config, Notmuch),
+        make_quoted_command(Notmuch, [
+            "show", "--format=raw", decrypt_arg(IsDecrypted),
+            part_id_to_part_option(PartId),
+            "--", message_id_to_search_term(MessageId)
+        ], no_redirect, redirect_output(FileName), Command),
+        % Decryption may invoke pinentry-curses.
+        curs.soft_suspend(io.call_system(Command), CallRes, !IO),
+        (
+            CallRes = ok(ExitStatus),
+            ( ExitStatus = 0 ->
+                Res = ok
+            ;
+                string.format("notmuch show returned exit status %d",
+                    [i(ExitStatus)], Msg),
+                Res = error(Msg)
+            )
+        ;
+            CallRes = error(Error),
+            Res = error(io.error_message(Error))
+        )
+    ;
+        MaybePartId = no,
+        % This is only supposed to be used for the message preview part on the
+        % compose screen. For saving parts from received messages,
+        % notmuch show --format=raw returns the part content without
+        % transcoding to UTF-8.
+        ( Part ^ pt_content = text(PartContent) ->
+            do_save_part_text_content(FileName, PartContent, Res, !IO)
+        ;
+            Res = error("no part id")
+        )
+    ).
+
+:- pred do_save_part_text_content(string::in, string::in, maybe_error::out,
+    io::di, io::uo) is det.
+
+do_save_part_text_content(FileName, PartContent, Res, !IO) :-
+    io.open_output(FileName, OpenRes, !IO),
+    (
+        OpenRes = ok(Stream),
+        promise_equivalent_solutions [Res, !:IO]
+        ( try [io(!IO)]
+            (
+                io.write_string(Stream, PartContent, !IO),
+                io.close_output(Stream, !IO)
+            )
+        then
+            Res = ok
+        catch_any Excp ->
+            Res = error("caught exception: " ++ string(Excp))
+        )
+    ;
+        OpenRes = error(Error),
+        Res = error(io.error_message(Error))
+    ).
+
+%-----------------------------------------------------------------------------%
+
+:- pred open_part(screen::in, pager_action::out, message_update::out,
+    pager_info::in, pager_info::out, common_history::in, common_history::out,
+    io::di, io::uo) is det.
+
+open_part(Screen, Action, MessageUpdate, !Info, !History, !IO) :-
+    ( get_highlighted_thing(!.Info, Thing) ->
+        (
+            Thing = highlighted_part(Part, _MaybeFilename),
+            prompt_open_part(Screen, Part, MessageUpdate, Tempfile,
+                !Info, !History, !IO),
+            (
+                Tempfile = yes(FileName),
+                Action = press_key_to_delete(FileName)
+            ;
+                Tempfile = no,
+                Action = redraw
+            )
+        ;
+            Thing = highlighted_url(Url),
+            prompt_open_url(Screen, Url, MessageUpdate, !Info, !History, !IO),
+            Action = redraw
+        ;
+            Thing = highlighted_fold_marker,
+            Action = continue,
+            MessageUpdate = set_warning("No message or attachment selected.")
+        )
+    ;
+        Action = continue,
+        MessageUpdate = set_warning("No message or attachment selected.")
+    ).
+
+:- pred prompt_open_part(screen::in, part::in, message_update::out,
+    maybe(string)::out, pager_info::in, pager_info::out,
+    common_history::in, common_history::out, io::di, io::uo) is det.
+
+prompt_open_part(Screen, Part, MessageUpdate, Tempfile, !Info, !History, !IO)
+        :-
+    OpenHistory0 = !.History ^ ch_open_part_history,
+    text_entry(Screen, "Open with command: ", OpenHistory0, complete_none,
+        Return, !IO),
+    (
+        Return = yes(Command1),
+        Command1 \= ""
+    ->
+        add_history_nodup(Command1, OpenHistory0, OpenHistory),
+        !History ^ ch_open_part_history := OpenHistory,
+        Config = !.Info ^ p_config,
+        do_open_part(Config, Screen, Part, Command1, MessageUpdate,
+            Tempfile, !Info, !IO)
+    ;
+        MessageUpdate = clear_message,
+        Tempfile = no
+    ).
+
+:- pred do_open_part(prog_config::in, screen::in, part::in, string::in,
+    message_update::out, maybe(string)::out, pager_info::in, pager_info::out,
+    io::di, io::uo) is det.
+
+do_open_part(Config, Screen, Part, Command, MessageUpdate, Tempfile,
+        !Info, !IO) :-
+    promise_equivalent_solutions [MessageUpdate, Tempfile, !:Info, !:IO] (
+        shell_word.split(Command, ParseResult),
+        (
+            ParseResult = ok([]),
+            % Should not happen.
+            MessageUpdate = clear_message,
+            Tempfile = no
+        ;
+            ParseResult = ok(CommandWords),
+            CommandWords = [_ | _],
+            do_open_part_2(Config, Screen, Part, CommandWords, MessageUpdate,
+                Tempfile, !Info, !IO)
+        ;
+            (
+                ParseResult = error(yes(Error), _Line, Column),
+                Message = string.format("parse error at column %d: %s",
+                    [i(Column), s(Error)])
+            ;
+                ParseResult = error(no, _Line, Column),
+                Message = string.format("parse error at column %d",
+                    [i(Column)])
+            ),
+            MessageUpdate = set_warning(Message),
+            Tempfile = no
+        )
+    ).
+
+:- pred do_open_part_2(prog_config::in, screen::in, part::in,
+    list(word)::in(non_empty_list), message_update::out, maybe(string)::out,
+    pager_info::in, pager_info::out, io::di, io::uo) is det.
+
+do_open_part_2(Config, Screen, Part, CommandWords, MessageUpdate, Tempfile,
+        !Info, !IO) :-
+    MaybePartFileName = Part ^ pt_filename,
+    (
+        MaybePartFileName = yes(filename(PartFilename)),
+        get_extension(PartFilename, Ext)
+    ->
+        make_temp_suffix(Ext, Res0, !IO)
+    ;
+        make_temp_suffix("", Res0, !IO)
+    ),
+    (
+        Res0 = ok(FileName),
+        do_save_part(Config, Part, FileName, Res, !IO),
+        (
+            Res = ok,
+            call_open_command(Screen, CommandWords, FileName, MaybeError, !IO),
+            (
+                MaybeError = ok,
+                Msg = "Press any key to continue (deletes temporary file)",
+                MessageUpdate = set_info(Msg),
+                Tempfile = yes(FileName)
+            ;
+                MaybeError = error(Msg),
+                MessageUpdate = set_warning(Msg),
+                Tempfile = no
+            )
+        ;
+            Res = error(Error),
+            string.format("Error saving to %s: %s", [s(FileName), s(Error)],
+                Msg),
+            MessageUpdate = set_warning(Msg),
+            Tempfile = no
+        )
+    ;
+        Res0 = error(Error),
+        string.format("Error opening temporary file: %s", [s(Error)], Msg),
+        MessageUpdate = set_warning(Msg),
+        Tempfile = no
+    ).
+
+:- pred call_open_command(screen::in, list(word)::in(non_empty_list),
+    string::in, maybe_error::out, io::di, io::uo) is det.
+
+call_open_command(Screen, CommandWords, Arg, MaybeError, !IO) :-
+    make_open_command(CommandWords, Arg, CommandToShow, CommandToRun, Bg),
+    CallMessage = set_info("Calling " ++ CommandToShow ++ "..."),
+    update_message_immed(Screen, CallMessage, !IO),
+    (
+        Bg = run_in_background,
+        io.call_system(CommandToRun, CallRes, !IO)
+    ;
+        Bg = run_in_foreground,
+        curs.suspend(io.call_system(CommandToRun), CallRes, !IO)
+    ),
+    (
+        CallRes = ok(ExitStatus),
+        ( ExitStatus = 0 ->
+            MaybeError = ok
+        ;
+            string.format("%s returned with exit status %d",
+                [s(CommandToShow), i(ExitStatus)], Msg),
+            MaybeError = error(Msg)
+        )
+    ;
+        CallRes = error(Error),
+        MaybeError = error("Error: " ++ io.error_message(Error))
+    ).
+
+:- pred make_open_command(list(word)::in(non_empty_list), string::in,
+    string::out, string::out, run_in_background::out) is det.
+
+make_open_command(CommandWords0, Arg, CommandToShow, CommandToRun, Bg) :-
+    remove_bg_operator(CommandWords0, CommandWords, Bg),
+    WordStrings = list.map(word_string, CommandWords),
+    CommandToShow = string.join_list(" ", WordStrings),
+    CommandPrefix = command_prefix(
+        shell_quoted(string.join_list(" ", list.map(quote_arg, WordStrings))),
+        ( detect_ssh(CommandWords) -> quote_twice ; quote_once )
+    ),
+    (
+        Bg = run_in_background,
+        make_quoted_command(CommandPrefix, [Arg],
+            redirect_input("/dev/null"), redirect_output("/dev/null"),
+            redirect_stderr("/dev/null"), run_in_background,
+            CommandToRun)
+    ;
+        Bg = run_in_foreground,
+        make_quoted_command(CommandPrefix, [Arg], no_redirect, no_redirect,
+            CommandToRun)
+    ).
+
+:- pred remove_bg_operator(list(word)::in(non_empty_list), list(word)::out,
+    run_in_background::out) is det.
+
+remove_bg_operator(Words0, Words, Bg) :-
+    (
+        list.split_last(Words0, ButLast, Last0),
+        remove_bg_operator_2(Last0, Last)
+    ->
+        (
+            Last = word([]),
+            Words = ButLast
+        ;
+            Last = word([_ | _]),
+            Words = ButLast ++ [Last]
+        ),
+        Bg = run_in_background
+    ;
+        Words = Words0,
+        Bg = run_in_foreground
+    ).
+
+:- pred remove_bg_operator_2(word::in, word::out) is semidet.
+
+remove_bg_operator_2(word(Segments0), word(Segments)) :-
+    list.split_last(Segments0, ButLast, Last0),
+    Last0 = unquoted(LastString0),
+    string.remove_suffix(LastString0, "&", LastString),
+    ( LastString = "" ->
+        Segments = ButLast
+    ;
+        Segments = ButLast ++ [unquoted(LastString)]
+    ).
+
+%-----------------------------------------------------------------------------%
+
+:- pred prompt_open_url(screen::in, string::in, message_update::out,
+    pager_info::in, pager_info::out, common_history::in, common_history::out,
+    io::di, io::uo) is det.
+
+prompt_open_url(Screen, Url, MessageUpdate, !Info, !History, !IO) :-
+    OpenHistory0 = !.History ^ ch_open_url_history,
+    % No completion for command inputs yet.
+    text_entry(Screen, "Open URL with command: ", OpenHistory0, complete_none,
+        Return, !IO),
+    (
+        Return = yes(Command1),
+        Command1 \= ""
+    ->
+        add_history_nodup(Command1, OpenHistory0, OpenHistory),
+        !History ^ ch_open_url_history := OpenHistory,
+        do_open_url(Screen, Command1, Url, MessageUpdate, !IO)
+    ;
+        MessageUpdate = clear_message
+    ).
+
+:- pred do_open_url(screen::in, string::in, string::in, message_update::out,
+    io::di, io::uo) is det.
+
+do_open_url(Screen, Command, Url, MessageUpdate, !IO) :-
+    promise_equivalent_solutions [MessageUpdate, !:IO] (
+        shell_word.split(Command, ParseResult),
+        (
+            ParseResult = ok([]),
+            % Should not happen.
+            MessageUpdate = clear_message
+        ;
+            ParseResult = ok(CommandWords),
+            CommandWords = [_ | _],
+            call_open_command(Screen, CommandWords, Url, MaybeError, !IO),
+            (
+                MaybeError = ok,
+                MessageUpdate = no_change
+            ;
+                MaybeError = error(Msg),
+                MessageUpdate = set_warning(Msg)
+            )
+        ;
+            (
+                ParseResult = error(yes(Error), _Line, Column),
+                Message = string.format("parse error at column %d: %s",
+                    [i(Column), s(Error)])
+            ;
+                ParseResult = error(no, _Line, Column),
+                Message = string.format("parse error at column %d",
+                    [i(Column)])
+            ),
+            MessageUpdate = set_warning(Message)
+        )
+    ).
 
 %-----------------------------------------------------------------------------%
 % vim: ft=mercury ts=4 sts=4 sw=4 et

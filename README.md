@@ -135,13 +135,15 @@ The keys are:
     Tab, comma      go to next unread thread
     Enter           open thread
     l, ~            change search terms ("limit")
+    Alt+Key         invoke search term alias named by Key
     =               refresh search results
     z               toggle authors column
 
     /, ?            search for string within results
     n               skip to next search result
+    N               skip to next search result in opposite direction
 
-    N               toggle 'unread' tag on current thread
+    U               toggle 'unread' tag on current thread
     F               toggle 'flagged' tag on current thread
     a               toggle 'inbox', 'unread' tags on current thread (archive)
     d               set 'deleted' tag on current thread
@@ -163,6 +165,10 @@ The keys are:
 
     q               quit
 
+Pressing Alt+Key will treat Key as a single character search alias that is
+invoked directly without further prompting (see below for search term aliases).
+This provides a convenient way to switch between frequent queries.
+
 Thread/pager view keys
 ----------------------
 
@@ -181,10 +187,11 @@ This view pages through an entire thread.  The keys are:
 
     /, ?            search for string
     n               skip to next search result
+    N               skip to next search result in opposite direction
 
     J               mark current message read and go to next message
     K               mark current message read and go to previous message
-    N               toggle 'unread' tag on current message
+    U               toggle 'unread' tag on current message
     ^R              remove 'unread' tag on preceding messages
     F               toggle 'flagged' tag on current message
     a               toggle 'inbox', 'unread' tags on current message (archive)
@@ -207,11 +214,11 @@ This view pages through an entire thread.  The keys are:
 
     v               highlight next visible attachment or URL or folded text
     V               highlight next visible attachment or top of message
-    s               save highlighted message/part
+    s, w            save highlighted message/part to file
     o               open highlighted message/part/URL with external program
     z               cycle alternative parts / toggle inline display / decrypt
     Z               toggle inline display of part / decrypt
-    z, o            expand/collapse folded text
+    z, Z            expand/collapse folded text
     y               verify signed part
 
     |               pipe thread or message IDs to command

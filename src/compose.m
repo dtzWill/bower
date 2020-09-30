@@ -13,7 +13,7 @@
 :- import_module rfc5322.
 :- import_module rfc5322.parser.
 :- import_module screen.
-:- import_module text_entry.
+:- import_module view_common.
 
 :- type reply_kind
     --->    direct_reply
@@ -25,20 +25,22 @@
     ;       not_sent.
 
 :- pred start_compose(prog_config::in, crypto::in, screen::in,
-    screen_transition(sent)::out, history::in, history::out,
-    history::in, history::out, io::di, io::uo) is det.
+    screen_transition(sent)::out, common_history::in, common_history::out,
+    io::di, io::uo) is det.
 
 :- pred start_reply(prog_config::in, crypto::in, screen::in,
     message::in(message), reply_kind::in, part_visibility_map::in,
-    screen_transition(sent)::out, io::di, io::uo) is det.
+    screen_transition(sent)::out, common_history::in, common_history::out,
+    io::di, io::uo) is det.
 
 :- pred start_reply_to_message_id(prog_config::in, crypto::in, screen::in,
     message_id::in, reply_kind::in, screen_transition(sent)::out,
-    io::di, io::uo) is det.
+    common_history::in, common_history::out, io::di, io::uo) is det.
 
 :- pred start_forward(prog_config::in, crypto::in, screen::in,
     message::in(message), part_visibility_map::in,
-    screen_transition(sent)::out, io::di, io::uo) is det.
+    screen_transition(sent)::out, common_history::in, common_history::out,
+    io::di, io::uo) is det.
 
 :- type continue_base
     --->    postponed_message
@@ -46,7 +48,8 @@
 
 :- pred continue_from_message(prog_config::in, crypto::in, screen::in,
     continue_base::in, message::in(message), part_visibility_map::in,
-    screen_transition(sent)::out, io::di, io::uo) is det.
+    screen_transition(sent)::out, common_history::in, common_history::out,
+    io::di, io::uo) is det.
 
     % Exported for resend.
     %
@@ -99,6 +102,7 @@
 :- import_module splitmix64.
 :- import_module string_util.
 :- import_module tags.
+:- import_module text_entry.
 :- import_module time_util.
 :- import_module write_message.
 
@@ -122,6 +126,8 @@
                 si_headers      :: headers,
                 si_parsed_hdrs  :: parsed_headers,
                 si_text         :: string,
+                si_alt_html     :: maybe(string),
+                si_make_alt_html:: use_alt_html_filter,
                 si_old_msgid    :: maybe(message_id),
                 si_attach_hist  :: history
             ).
@@ -156,8 +162,9 @@
 
 :- type staging_screen_action
     --->    continue
-    ;       resize
+    ;       resize(message_update)
     ;       edit
+    ;       press_key_to_delete(string)
     ;       leave(sent, message_update).
 
 :- type call_res
@@ -166,17 +173,18 @@
 
 %-----------------------------------------------------------------------------%
 
-start_compose(Config, Crypto, Screen, Transition, !ToHistory, !SubjectHistory,
-        !IO) :-
-    text_entry_initial(Screen, "To: ", !.ToHistory, "",
+start_compose(Config, Crypto, Screen, Transition, !History, !IO) :-
+    ToHistory0 = !.History ^ ch_to_history,
+    text_entry_initial(Screen, "To: ", ToHistory0, "",
         complete_address(Config), MaybeInput, !IO),
     (
         MaybeInput = yes(Input),
-        add_history_nodup(Input, !ToHistory),
+        add_history_nodup(Input, ToHistory0, ToHistory),
+        !History ^ ch_to_history := ToHistory,
         ( is_mailto_uri(Input) ->
             ( extract_mailto(Input, Headers, Body) ->
                 start_compose_2(Config, Crypto, Screen, Headers, Body,
-                    Transition, !SubjectHistory, !IO)
+                    Transition, !History, !IO)
             ;
                 Message = set_warning("Could not parse mailto URI."),
                 Transition = screen_transition(not_sent, Message)
@@ -187,7 +195,7 @@ start_compose(Config, Crypto, Screen, Transition, !ToHistory, !SubjectHistory,
             Headers = Headers0 ^ h_to := header_value(To),
             Body = "",
             start_compose_2(Config, Crypto, Screen, Headers, Body, Transition,
-                !SubjectHistory, !IO)
+                !History, !IO)
         )
     ;
         MaybeInput = no,
@@ -195,34 +203,38 @@ start_compose(Config, Crypto, Screen, Transition, !ToHistory, !SubjectHistory,
     ).
 
 :- pred start_compose_2(prog_config::in, crypto::in, screen::in, headers::in,
-    string::in, screen_transition(sent)::out, history::in, history::out,
-    io::di, io::uo) is det.
+    string::in, screen_transition(sent)::out,
+    common_history::in, common_history::out, io::di, io::uo) is det.
 
 start_compose_2(Config, Crypto, Screen, !.Headers, Body, Transition,
-        !SubjectHistory, !IO) :-
+        !History, !IO) :-
     Subject0 = header_value_string(!.Headers ^ h_subject),
     ( Subject0 = "" ->
-        text_entry_initial(Screen, "Subject: ", !.SubjectHistory, "",
+        SubjectHistory0 = !.History ^ ch_subject_history,
+        text_entry_initial(Screen, "Subject: ", SubjectHistory0, "",
             complete_none, MaybeSubject, !IO),
         (
             MaybeSubject = yes(Subject),
-            add_history_nodup(Subject, !SubjectHistory),
+            add_history_nodup(Subject, SubjectHistory0, SubjectHistory),
+            !History ^ ch_subject_history := SubjectHistory,
             !Headers ^ h_subject := decoded_unstructured(Subject),
             start_compose_3(Config, Crypto, Screen, !.Headers, Body,
-                Transition, !IO)
+                Transition, !History, !IO)
         ;
             MaybeSubject = no,
             Transition = screen_transition(not_sent, no_change)
         )
     ;
         start_compose_3(Config, Crypto, Screen, !.Headers, Body, Transition,
-            !IO)
+            !History, !IO)
     ).
 
 :- pred start_compose_3(prog_config::in, crypto::in, screen::in, headers::in,
-    string::in, screen_transition(sent)::out, io::di, io::uo) is det.
+    string::in, screen_transition(sent)::out,
+    common_history::in, common_history::out, io::di, io::uo) is det.
 
-start_compose_3(Config, Crypto, Screen, !.Headers, Body, Transition, !IO) :-
+start_compose_3(Config, Crypto, Screen, !.Headers, Body, Transition,
+        !History, !IO) :-
     get_default_account(Config, MaybeAccount),
     (
         MaybeAccount = yes(Account),
@@ -235,7 +247,7 @@ start_compose_3(Config, Crypto, Screen, !.Headers, Body, Transition, !IO) :-
     Attachments = [],
     MaybeOldDraft = no,
     create_edit_stage(Config, Crypto, Screen, !.Headers, Body, Attachments,
-        MaybeOldDraft, no, no, Transition, !IO).
+        MaybeOldDraft, no, no, Transition, !History, !IO).
 
 %-----------------------------------------------------------------------------%
 
@@ -292,7 +304,7 @@ expand_aliases(Config, QuoteOpt, Input, Output, !IO) :-
 %-----------------------------------------------------------------------------%
 
 start_reply(Config, Crypto, Screen, Message, ReplyKind, PartVisibilityMap,
-        Transition, !IO) :-
+        Transition, !History, !IO) :-
     Message ^ m_id = MessageId,
     WasEncrypted = contains(Message ^ m_tags, encrypted_tag),
     run_notmuch(Config,
@@ -322,7 +334,7 @@ start_reply(Config, Crypto, Screen, Message, ReplyKind, PartVisibilityMap,
         MaybeOldDraft = no,
         SignInit = no,
         create_edit_stage(Config, Crypto, Screen, Headers, Body, Attachments,
-            MaybeOldDraft, WasEncrypted, SignInit, Transition, !IO)
+            MaybeOldDraft, WasEncrypted, SignInit, Transition, !History, !IO)
     ;
         ResParse = error(Error),
         Warning = "Error parsing notmuch response: " ++ Error,
@@ -402,7 +414,7 @@ contains(Set, X) = pred_to_bool(contains(Set, X)).
 %-----------------------------------------------------------------------------%
 
 start_reply_to_message_id(Config, Crypto, Screen, MessageId, ReplyKind,
-        Transition, !IO) :-
+        Transition, !History, !IO) :-
     % XXX we could parse the message in notmuch reply --format=json now
     run_notmuch(Config,
         [
@@ -417,7 +429,7 @@ start_reply_to_message_id(Config, Crypto, Screen, MessageId, ReplyKind,
             Message = message(_, _, _, _, _, _),
             PartVisibilityMap = map.init,
             start_reply(Config, Crypto, Screen, Message, ReplyKind,
-                PartVisibilityMap, Transition, !IO)
+                PartVisibilityMap, Transition, !History, !IO)
         ;
             Message = excluded_message(_, _, _, _, _),
             Warning = "Excluded message.",
@@ -432,7 +444,7 @@ start_reply_to_message_id(Config, Crypto, Screen, MessageId, ReplyKind,
 %-----------------------------------------------------------------------------%
 
 start_forward(Config, Crypto, Screen, Message, PartVisibilityMap, Transition,
-        !IO) :-
+        !History, !IO) :-
     get_default_account(Config, MaybeAccount),
     (
         MaybeAccount = yes(Account),
@@ -448,12 +460,12 @@ start_forward(Config, Crypto, Screen, Message, PartVisibilityMap, Transition,
     WasEncrypted = contains(Message ^ m_tags, encrypted_tag),
     DraftSign = no,
     create_edit_stage(Config, Crypto, Screen, Headers, Body, Attachments,
-        MaybeOldDraft, WasEncrypted, DraftSign, Transition, !IO).
+        MaybeOldDraft, WasEncrypted, DraftSign, Transition, !History, !IO).
 
 %-----------------------------------------------------------------------------%
 
 continue_from_message(Config, Crypto, Screen, ContinueBase, Message,
-        PartVisibilityMap, Transition, !IO) :-
+        PartVisibilityMap, Transition, !History, !IO) :-
     Message = message(MessageId, _Timestamp, Headers0, Tags0, Body0, _Replies0),
     select_main_part_and_attachments(PartVisibilityMap, [Body0], MaybeMainPart,
         AttachmentParts),
@@ -499,7 +511,7 @@ continue_from_message(Config, Crypto, Screen, ContinueBase, Message,
             MaybeOldDraft = no
         ),
         create_edit_stage(Config, Crypto, Screen, Headers, Text, Attachments,
-            MaybeOldDraft, WasEncrypted, DraftSign, Transition, !IO)
+            MaybeOldDraft, WasEncrypted, DraftSign, Transition, !History, !IO)
     ;
         CallRes = error(Error),
         string.append_list(["Error running notmuch: ",
@@ -515,29 +527,34 @@ to_old_attachment(Part, old_attachment(Part)).
 
 :- pred create_edit_stage(prog_config::in, crypto::in, screen::in, headers::in,
     string::in, list(attachment)::in, maybe(message_id)::in, bool::in,
-    bool::in, screen_transition(sent)::out, io::di, io::uo) is det.
+    bool::in, screen_transition(sent)::out,
+    common_history::in, common_history::out, io::di, io::uo) is det.
 
 create_edit_stage(Config, Crypto, Screen, Headers0, Text0, Attachments,
-        MaybeOldDraft, EncryptInit, SignInit, Transition, !IO) :-
+        MaybeOldDraft, EncryptInit, SignInit, Transition,
+        !History, !IO) :-
     get_encrypt_by_default(Config, EncryptByDefault),
     get_sign_by_default(Config, SignByDefault),
     CryptoInfo0 = init_crypto_info(Crypto,
         EncryptByDefault `or` EncryptInit,
         SignByDefault `or` SignInit),
-    create_edit_stage_2(Config, Screen, Headers0, Text0, Attachments,
-        MaybeOldDraft, Transition, CryptoInfo0, CryptoInfo, !IO),
+    get_use_alt_html_filter(Config, UseAltHtmlFilter),
+    create_edit_stage_2(Config, Screen, Headers0, Text0, UseAltHtmlFilter,
+        Attachments, MaybeOldDraft, Transition, CryptoInfo0, CryptoInfo,
+        !History, !IO),
     unref_keys(CryptoInfo, !IO).
 
 :- pred create_edit_stage_2(prog_config::in, screen::in,
-    headers::in, string::in, list(attachment)::in, maybe(message_id)::in,
+    headers::in, string::in, use_alt_html_filter::in,
+    list(attachment)::in, maybe(message_id)::in,
     screen_transition(sent)::out, crypto_info::in, crypto_info::out,
-    io::di, io::uo) is det.
+    common_history::in, common_history::out, io::di, io::uo) is det.
 
-create_edit_stage_2(Config, Screen, Headers0, Text0, Attachments,
-        MaybeOldDraft, Transition, !CryptoInfo, !IO) :-
+create_edit_stage_2(Config, Screen, Headers0, Text0, UseAltHtmlFilter,
+        Attachments, MaybeOldDraft, Transition, !CryptoInfo, !History, !IO) :-
     make_parsed_headers(Headers0, ParsedHeaders0),
     create_temp_message_file(Config, prepare_edit, Headers0,
-        ParsedHeaders0, Text0, Attachments, !.CryptoInfo, ResFilename,
+        ParsedHeaders0, Text0, no, Attachments, !.CryptoInfo, ResFilename,
         _MaybeWarning, !IO),
     (
         ResFilename = ok(Filename),
@@ -550,7 +567,8 @@ create_edit_stage_2(Config, Screen, Headers0, Text0, Attachments,
                 io.remove_file(Filename, _, !IO),
                 update_references(Headers0, Headers1, Headers2),
                 reenter_staging_screen(Config, Screen, Headers2, Text,
-                    Attachments, MaybeOldDraft, Transition, !CryptoInfo, !IO)
+                    UseAltHtmlFilter, Attachments, MaybeOldDraft, Transition,
+                    !CryptoInfo, !History, !IO)
             ;
                 ResParse = error(Error),
                 io.error_message(Error, Msg),
@@ -622,25 +640,129 @@ update_references(Headers0, !Headers) :-
 %-----------------------------------------------------------------------------%
 
 :- pred reenter_staging_screen(prog_config::in, screen::in, headers::in,
-    string::in, list(attachment)::in, maybe(message_id)::in,
-    screen_transition(sent)::out, crypto_info::in, crypto_info::out,
+    string::in, use_alt_html_filter::in, list(attachment)::in,
+    maybe(message_id)::in, screen_transition(sent)::out,
+    crypto_info::in, crypto_info::out, common_history::in, common_history::out,
     io::di, io::uo) is det.
 
-reenter_staging_screen(Config, Screen, Headers0, Text, Attachments,
-        MaybeOldDraft, Transition, !CryptoInfo, !IO) :-
+reenter_staging_screen(Config, Screen, Headers0, Text, UseAltHtmlFilter,
+        Attachments, MaybeOldDraft, Transition, !CryptoInfo, !History, !IO) :-
     parse_and_expand_headers(Config, Headers0, Headers, Parsed, !IO),
     get_some_matching_account(Config, Parsed ^ ph_from, MaybeAccount),
     maintain_encrypt_keys(Parsed, !CryptoInfo, !IO),
     maintain_sign_keys(Parsed, !CryptoInfo, !IO),
 
-    StagingInfo = staging_info(Config, MaybeAccount, Headers, Parsed, Text,
-        MaybeOldDraft, init_history),
+    % XXX loses attach history
+    StagingInfo0 = staging_info(Config, MaybeAccount, Headers, Parsed,
+        Text, no, UseAltHtmlFilter, MaybeOldDraft, init_history),
+    maybe_make_alt_html(FilterRes, StagingInfo0, StagingInfo, !IO),
+    MaybeAltHtml = StagingInfo ^ si_alt_html,
     AttachInfo = scrollable.init_with_cursor(Attachments),
     get_cols(Screen, Cols, !IO),
-    setup_pager_for_staging(Config, Cols, Text, new_pager, PagerInfo),
-    update_message(Screen, clear_message, !IO),
-    staging_screen(Screen, StagingInfo, AttachInfo, PagerInfo, Transition,
-        !CryptoInfo, !IO).
+    setup_pager_for_staging(Config, Cols, Text, MaybeAltHtml, new_pager,
+        PagerInfo, !IO),
+    (
+        FilterRes = no,
+        update_message(Screen, clear_message, !IO)
+    ;
+        FilterRes = yes(ok),
+        update_message(Screen, clear_message, !IO)
+    ;
+        FilterRes = yes(error(Error)),
+        update_message(Screen, set_warning(Error), !IO)
+    ),
+    staging_screen(Screen, no, StagingInfo, AttachInfo, PagerInfo, Transition,
+        !CryptoInfo, !History, !IO).
+
+:- func headers_as_env(headers) = spawn_env.
+
+headers_as_env(Headers) =
+     environ([
+        set_var("MAIL_FROM", header_value_string(Headers ^ h_from)),
+        set_var("MAIL_TO", header_value_string(Headers ^ h_to)),
+        set_var("MAIL_CC", header_value_string(Headers ^ h_cc)),
+        set_var("MAIL_BCC", header_value_string(Headers ^ h_bcc)),
+        set_var("MAIL_SUBJECT", header_value_string(Headers ^ h_subject)),
+        set_var("MAIL_REPLY_TO", header_value_string(Headers ^ h_replyto)),
+        set_var("MAIL_IN_REPLY_TO", header_value_string(Headers ^ h_inreplyto))
+    ]).
+
+:- pred make_alt_html(prog_config::in, headers::in, string::in,
+    maybe(string)::out, call_res::out, io::di, io::uo) is det.
+
+make_alt_html(Config, Headers, TextIn, MaybeAltHtml, Res, !IO) :-
+    get_alt_html_filter_command(Config, MaybeCommand),
+    (
+        MaybeCommand = no,
+        MaybeAltHtml = no,
+        Res = ok
+    ;
+        MaybeCommand = yes(CommandPrefix),
+        % We don't really need to invoke the shell but this is easier for now.
+        make_quoted_command(CommandPrefix, [], no_redirect, no_redirect,
+            redirect_stderr("/dev/null"), run_in_foreground, Command),
+        SpawnEnv = headers_as_env(Headers),
+        ErrorLimit = yes(100),
+        call_system_filter(Command, SpawnEnv, TextIn, ErrorLimit, CallRes,
+            !IO),
+        (
+            CallRes = ok(Output),
+            Res = ok,
+            ( string.all_match(char.is_whitespace, Output) ->
+                MaybeAltHtml = no
+            ;
+                MaybeAltHtml = yes(Output)
+            )
+        ;
+            CallRes = error(Error),
+            string.append_list(["Error running ", Command, ": ",
+                io.error_message(Error)], Warning),
+            Res = error(Warning),
+            MaybeAltHtml = no
+        )
+    ).
+
+:- pred maybe_make_alt_html(maybe(call_res)::out, staging_info::in,
+    staging_info::out, io::di, io::uo) is det.
+
+maybe_make_alt_html(MaybeFilterRes, !StagingInfo, !IO) :-
+    Config = !.StagingInfo ^ si_config,
+    Headers = !.StagingInfo ^ si_headers,
+    Text = !.StagingInfo ^ si_text,
+    UseFilter0 = !.StagingInfo ^ si_make_alt_html,
+    (
+        ( UseFilter0 = alt_html_filter_always
+        ; UseFilter0 = alt_html_filter_on
+        ),
+        make_alt_html(Config, Headers, Text, MaybeAltHtml, FilterRes, !IO),
+        MaybeFilterRes = yes(FilterRes)
+    ;
+        ( UseFilter0 = alt_html_filter_never
+        ; UseFilter0 = alt_html_filter_off
+        ),
+        MaybeFilterRes = no,
+        MaybeAltHtml = no
+    ),
+    (
+        UseFilter0 = alt_html_filter_always,
+        UseFilter = alt_html_filter_always
+    ;
+        UseFilter0 = alt_html_filter_never,
+        UseFilter = alt_html_filter_never
+    ;
+        ( UseFilter0 = alt_html_filter_on
+        ; UseFilter0 = alt_html_filter_off
+        ),
+        (
+            MaybeAltHtml = yes(_),
+            UseFilter = alt_html_filter_on
+        ;
+            MaybeAltHtml = no,
+            UseFilter = alt_html_filter_off
+        )
+    ),
+    !StagingInfo ^ si_alt_html := MaybeAltHtml,
+    !StagingInfo ^ si_make_alt_html := UseFilter.
 
 :- pred parse_and_expand_headers(prog_config::in, headers::in, headers::out,
     parsed_headers::out, io::di, io::uo) is det.
@@ -738,14 +860,18 @@ maybe_expand_mailbox(Config, Opt, Mailbox0, Mailbox, !Cache, !IO) :-
 
 %-----------------------------------------------------------------------------%
 
-:- pred staging_screen(screen::in, staging_info::in, attach_info::in,
-    pager_info::in, screen_transition(sent)::out,
-    crypto_info::in, crypto_info::out, io::di, io::uo) is det.
+    % XXX should probably just return staging_info, etc.
+    % then common_history does not need to be separate
+    %
+:- pred staging_screen(screen::in, maybe(keycode)::in, staging_info::in,
+    attach_info::in, pager_info::in, screen_transition(sent)::out,
+    crypto_info::in, crypto_info::out, common_history::in, common_history::out,
+    io::di, io::uo) is det.
 
-staging_screen(Screen, !.StagingInfo, !.AttachInfo, !.PagerInfo, Transition,
-        !CryptoInfo, !IO) :-
+staging_screen(Screen, MaybeKey, !.StagingInfo, !.AttachInfo, !.PagerInfo,
+        Transition, !CryptoInfo, !History, !IO) :-
     !.StagingInfo = staging_info(Config, MaybeAccount, Headers, ParsedHeaders,
-        Text, MaybeOldDraft, _AttachHistory),
+        Text, MaybeAltHtml, UseAltHtmlFilter, MaybeOldDraft, _AttachHistory),
     Attrs = compose_attrs(Config),
     PagerAttrs = pager_attrs(Config),
 
@@ -764,7 +890,12 @@ staging_screen(Screen, !.StagingInfo, !.AttachInfo, !.PagerInfo, Transition,
 
     NumAttachmentRows = list.length(AttachmentPanels),
     NumPagerRows = list.length(PagerPanels),
-    get_keycode_blocking(KeyCode, !IO),
+    (
+        MaybeKey = yes(KeyCode)
+    ;
+        MaybeKey = no,
+        get_keycode_blocking(KeyCode, !IO)
+    ),
     ( KeyCode = char('e') ->
         Action = edit
     ; KeyCode = char('f') ->
@@ -776,7 +907,7 @@ staging_screen(Screen, !.StagingInfo, !.AttachInfo, !.PagerInfo, Transition,
     ; KeyCode = char('c') ->
         edit_header(Screen, cc, !StagingInfo, !CryptoInfo, !IO),
         Action = continue
-    ; KeyCode = char('b') ->
+    ; KeyCode = char('B') ->
         edit_header(Screen, bcc, !StagingInfo, !CryptoInfo, !IO),
         Action = continue
     ; KeyCode = char('s') ->
@@ -791,6 +922,16 @@ staging_screen(Screen, !.StagingInfo, !.AttachInfo, !.PagerInfo, Transition,
     ; KeyCode = char('S') ->
         toggle_sign(!StagingInfo, !CryptoInfo, !IO),
         Action = continue
+    ; KeyCode = char('H') ->
+        toggle_alt_html(MessageUpdate0, NeedsResize, !StagingInfo, !IO),
+        (
+            NeedsResize = yes,
+            Action = resize(MessageUpdate0)
+        ;
+            NeedsResize = no,
+            update_message(Screen, MessageUpdate0, !IO),
+            Action = continue
+        )
     ;
         ( KeyCode = char('j')
         ; KeyCode = code(curs.key_down)
@@ -817,8 +958,8 @@ staging_screen(Screen, !.StagingInfo, !.AttachInfo, !.PagerInfo, Transition,
         Action = continue
     ; KeyCode = char('p') ->
         Attachments = get_lines_list(!.AttachInfo),
-        postpone(Config, Screen, Headers, ParsedHeaders, Text, Attachments,
-            !.CryptoInfo, Res, PostponeMsg, !IO),
+        postpone(Config, Screen, Headers, ParsedHeaders, Text,
+            Attachments, !.CryptoInfo, Res, PostponeMsg, !IO),
         (
             Res = yes,
             maybe_remove_draft(!.StagingInfo, !IO),
@@ -833,7 +974,8 @@ staging_screen(Screen, !.StagingInfo, !.AttachInfo, !.PagerInfo, Transition,
         (
             MaybeAccount = yes(Account),
             send_mail(Config, Account, Screen, Headers, ParsedHeaders, Text,
-                Attachments, !.CryptoInfo, Sent0, MessageUpdate0, !IO)
+                MaybeAltHtml, Attachments, !.CryptoInfo, Sent0, MessageUpdate0,
+                !IO)
         ;
             MaybeAccount = no,
             Sent0 = not_sent,
@@ -881,30 +1023,59 @@ staging_screen(Screen, !.StagingInfo, !.AttachInfo, !.PagerInfo, Transition,
             Action = leave(not_sent, Message)
         )
     ; KeyCode = code(curs.key_resize) ->
-        Action = resize
+        Action = resize(no_change)
     ;
-        pager_input(NumPagerRows, KeyCode, _Action, MessageUpdate, !PagerInfo),
+        pager_input(Screen, NumPagerRows, KeyCode, PagerAction, MessageUpdate,
+            !PagerInfo, !History, !IO),
         update_message(Screen, MessageUpdate, !IO),
-        Action = continue
+        convert_pager_action(PagerAction, Action)
     ),
     (
         Action = continue,
-        staging_screen(Screen, !.StagingInfo, !.AttachInfo, !.PagerInfo,
-            Transition, !CryptoInfo, !IO)
+        staging_screen(Screen, no, !.StagingInfo, !.AttachInfo, !.PagerInfo,
+            Transition, !CryptoInfo, !History, !IO)
     ;
-        Action = resize,
+        Action = press_key_to_delete(FileName),
+        get_keycode_blocking(NextKey, !IO),
+        io.remove_file(FileName, _, !IO),
+        staging_screen(Screen, yes(NextKey), !.StagingInfo, !.AttachInfo,
+            !.PagerInfo, Transition, !CryptoInfo, !History, !IO)
+    ;
+        Action = resize(DeferredMessageUpdate),
         resize_staging_screen(Screen, !.StagingInfo, !PagerInfo, !IO),
-        staging_screen(Screen, !.StagingInfo, !.AttachInfo, !.PagerInfo,
-            Transition, !CryptoInfo, !IO)
+        update_message(Screen, DeferredMessageUpdate, !IO),
+        staging_screen(Screen, no, !.StagingInfo, !.AttachInfo, !.PagerInfo,
+            Transition, !CryptoInfo, !History, !IO)
     ;
         Action = edit,
         EditAttachments = get_lines_list(!.AttachInfo),
         % XXX make this tail-recursive in hlc
-        create_edit_stage_2(Config, Screen, Headers, Text, EditAttachments,
-            MaybeOldDraft, Transition, !CryptoInfo, !IO)
+        create_edit_stage_2(Config, Screen, Headers, Text, UseAltHtmlFilter,
+            EditAttachments, MaybeOldDraft, Transition, !CryptoInfo, !History,
+            !IO)
     ;
         Action = leave(Sent, TransitionMessage),
         Transition = screen_transition(Sent, TransitionMessage)
+    ).
+
+:- pred convert_pager_action(pager_action::in, staging_screen_action::out)
+    is det.
+
+convert_pager_action(PagerAction, Action) :-
+    (
+        PagerAction = continue,
+        Action = continue
+    ;
+        PagerAction = decrypt_part,
+        % Should have nothing to decrypt on this screen.
+        Action = continue
+    ;
+        PagerAction = redraw,
+        % staging_screen always redraws.
+        Action = continue
+    ;
+        PagerAction = press_key_to_delete(FileName),
+        Action = press_key_to_delete(FileName)
     ).
 
 :- pred resize_staging_screen(screen::in, staging_info::in,
@@ -919,8 +1090,9 @@ resize_staging_screen(Screen, StagingInfo, PagerInfo0, PagerInfo, !IO) :-
     NumPagerRows = list.length(PagerPanels),
     Config = StagingInfo ^ si_config,
     Text = StagingInfo ^ si_text,
-    setup_pager_for_staging(Config, Cols, Text,
-        retain_pager_pos(PagerInfo0, NumPagerRows), PagerInfo).
+    MaybeAltHtml = StagingInfo ^ si_alt_html,
+    setup_pager_for_staging(Config, Cols, Text, MaybeAltHtml,
+        retain_pager_pos(PagerInfo0, NumPagerRows), PagerInfo, !IO).
 
 %-----------------------------------------------------------------------------%
 
@@ -1048,6 +1220,52 @@ toggle_sign(!StagingInfo, !CryptoInfo, !IO) :-
     !CryptoInfo ^ ci_sign := not(!.CryptoInfo ^ ci_sign),
     ParsedHeaders = !.StagingInfo ^ si_parsed_hdrs,
     maintain_sign_keys(ParsedHeaders, !CryptoInfo, !IO).
+
+:- pred toggle_alt_html(message_update::out, bool::out, staging_info::in,
+    staging_info::out, io::di, io::uo) is det.
+
+toggle_alt_html(Message, NeedsResize, !StagingInfo, !IO) :-
+    Config = !.StagingInfo ^ si_config,
+    Headers = !.StagingInfo ^ si_headers,
+    Text = !.StagingInfo ^ si_text,
+    UseFilter0 = !.StagingInfo ^ si_make_alt_html,
+    (
+        UseFilter0 = alt_html_filter_always,
+        Message = set_warning("use_alt_html_filter is set to always."),
+        NeedsResize = no
+    ;
+        UseFilter0 = alt_html_filter_never,
+        Message = set_warning("use_alt_html_filter is set to never."),
+        NeedsResize = no
+    ;
+        UseFilter0 = alt_html_filter_on,
+        !StagingInfo ^ si_alt_html := no,
+        !StagingInfo ^ si_make_alt_html := alt_html_filter_off,
+        Message = set_info("Removed text/html alternative."),
+        NeedsResize = yes
+    ;
+        UseFilter0 = alt_html_filter_off,
+        make_alt_html(Config, Headers, Text, MaybeAltHtml, FilterRes, !IO),
+        (
+            FilterRes = ok,
+            (
+                MaybeAltHtml = yes(Html),
+                !StagingInfo ^ si_alt_html := yes(Html),
+                !StagingInfo ^ si_make_alt_html := alt_html_filter_on,
+                Message = set_info("Added text/html alternative."),
+                NeedsResize = yes
+            ;
+                MaybeAltHtml = no,
+                Message = set_warning("Not adding text/html alternative; " ++
+                    "the filter returned nothing."),
+                NeedsResize = no
+            )
+        ;
+            FilterRes = error(Error),
+            Message = set_warning(Error),
+            NeedsResize = no
+        )
+    ).
 
 %-----------------------------------------------------------------------------%
 
@@ -1753,9 +1971,14 @@ draw_sep_bar(_, no, _, !IO).
 draw_sep_bar(Screen, yes(Panel), Attrs, !IO) :-
     get_cols(Screen, Cols, !IO),
     erase(Screen, Panel, !IO),
+    ( Cols =< 86 ->
+        EditFields = "(ftcBsr)"
+    ;
+        EditFields = "(ftcBsr) edit fields"
+    ),
     draw(Screen, Panel, Attrs ^ c_status ^ bar,
-        "-- (ftcbsr) edit fields; (E)ncrypt, (S)ign; " ++
-        "(a)ttach, (d)etach, media (T)ype ", !IO),
+        "-- " ++ EditFields ++ "; (E)ncrypt, (S)ign; " ++
+        "(a)ttach, (d)etach, media (T)ype, (H)TML ", !IO),
     hline(Screen, Panel, '-', Cols, !IO).
 
 :- pred draw_staging_bar(compose_attrs::in, screen::in, staging_info::in,
@@ -1783,10 +2006,10 @@ draw_staging_bar(Attrs, Screen, StagingInfo, !IO) :-
     string::in, list(attachment)::in, crypto_info::in, bool::out,
     message_update::out, io::di, io::uo) is det.
 
-postpone(Config, Screen, Headers, ParsedHeaders, Text, Attachments, CryptoInfo,
-        Res, MessageUpdate, !IO) :-
+postpone(Config, Screen, Headers, ParsedHeaders, Text, Attachments,
+        CryptoInfo, Res, MessageUpdate, !IO) :-
     create_temp_message_file(Config, prepare_postpone, Headers, ParsedHeaders,
-        Text, Attachments, CryptoInfo, ResFilename, Warnings, !IO),
+        Text, no, Attachments, CryptoInfo, ResFilename, Warnings, !IO),
     (
         ResFilename = ok(Filename),
         (
@@ -1846,13 +2069,13 @@ maybe_remove_draft(StagingInfo, !IO) :-
 %-----------------------------------------------------------------------------%
 
 :- pred send_mail(prog_config::in, account::in, screen::in, headers::in,
-    parsed_headers::in, string::in, list(attachment)::in, crypto_info::in,
-    sent::out, message_update::out, io::di, io::uo) is det.
+    parsed_headers::in, string::in, maybe(string)::in, list(attachment)::in,
+    crypto_info::in, sent::out, message_update::out, io::di, io::uo) is det.
 
-send_mail(Config, Account, Screen, Headers, ParsedHeaders, Text, Attachments,
-        CryptoInfo, Res, MessageUpdate, !IO) :-
+send_mail(Config, Account, Screen, Headers, ParsedHeaders, Text, MaybeAltHtml,
+        Attachments, CryptoInfo, Res, MessageUpdate, !IO) :-
     create_temp_message_file(Config, prepare_send, Headers, ParsedHeaders,
-        Text, Attachments, CryptoInfo, ResFilename, Warnings, !IO),
+        Text, MaybeAltHtml, Attachments, CryptoInfo, ResFilename, Warnings, !IO),
     (
         ResFilename = ok(Filename),
         prompt_confirm_warnings(Screen, Warnings, ConfirmAll, !IO),
@@ -2012,12 +2235,12 @@ tag_replied_message(Config, Headers, Res, !IO) :-
     ;       prepare_postpone.
 
 :- pred create_temp_message_file(prog_config::in, prepare_temp::in,
-    headers::in, parsed_headers::in, string::in, list(attachment)::in,
-    crypto_info::in, maybe_error(string)::out, list(string)::out,
-    io::di, io::uo) is det.
+    headers::in, parsed_headers::in, string::in, maybe(string)::in,
+    list(attachment)::in, crypto_info::in, maybe_error(string)::out,
+    list(string)::out, io::di, io::uo) is det.
 
-create_temp_message_file(Config, Prepare, Headers, ParsedHeaders, Text,
-        Attachments, CryptoInfo, Res, Warnings, !IO) :-
+create_temp_message_file(Config, Prepare, Headers, ParsedHeaders,
+        Text, MaybeAltHtml, Attachments, CryptoInfo, Res, Warnings, !IO) :-
     % We only use this to generate MIME boundaries.
     current_timestamp(timestamp(Seed), !IO),
     splitmix64.init(truncate_to_int(Seed), RS0),
@@ -2047,9 +2270,8 @@ create_temp_message_file(Config, Prepare, Headers, ParsedHeaders, Text,
         (
             Encrypt = no,
             Sign = no,
-            generate_boundary(MixedBoundary, RS0, _RS),
-            make_text_and_attachments_mime_part(cte_8bit, Text, Attachments,
-                boundary(MixedBoundary), Res0),
+            make_text_and_attachments_mime_part(cte_8bit, Text, MaybeAltHtml,
+                Attachments, RS0, _RS, Res0),
             (
                 Res0 = ok(MimePart),
                 Spec = message_spec(WriteHeaders, mime_v1(MimePart)),
@@ -2090,9 +2312,8 @@ create_temp_message_file(Config, Prepare, Headers, ParsedHeaders, Text,
                 EncryptKeys = [_ | _],
                 missing_keys_warning(Missing, WarningsA),
                 leaked_bccs_warning(LeakedBccs, WarningsB),
-                generate_boundary(MixedBoundary, RS0, RS1),
-                make_text_and_attachments_mime_part(TextCTE, Text, Attachments,
-                    boundary(MixedBoundary), Res0),
+                make_text_and_attachments_mime_part(TextCTE, Text,
+                    MaybeAltHtml, Attachments, RS0, RS1, Res0),
                 (
                     Res0 = ok(PartToEncrypt),
                     generate_boundary(EncryptedBoundary, RS1, _RS),
@@ -2121,9 +2342,8 @@ create_temp_message_file(Config, Prepare, Headers, ParsedHeaders, Text,
                 SignKeys = [_ | _],
                 % Force text parts to be base64-encoded to avoid being mangled
                 % during transfer.
-                generate_boundary(MixedBoundary, RS0, RS1),
-                make_text_and_attachments_mime_part(cte_base64, Text, Attachments,
-                    boundary(MixedBoundary), Res0),
+                make_text_and_attachments_mime_part(cte_base64, Text,
+                    MaybeAltHtml, Attachments, RS0, RS1, Res0),
                 (
                     Res0 = ok(PartToSign),
                     generate_boundary(SignedBoundary, RS1, _RS),
@@ -2234,13 +2454,29 @@ maybe_cons_unstructured(SkipEmpty, Options, FieldName, Value, !Acc) :-
 %-----------------------------------------------------------------------------%
 
 :- pred make_text_and_attachments_mime_part(write_content_transfer_encoding::in,
-    string::in, list(attachment)::in, boundary::in,
-    maybe_error(mime_part)::out) is det.
+    string::in, maybe(string)::in, list(attachment)::in, splitmix64::in,
+    splitmix64::out, maybe_error(mime_part)::out) is det.
 
-make_text_and_attachments_mime_part(TextCTE, Text, Attachments, MixedBoundary,
-        Res) :-
-    TextPart = discrete(text_plain, yes("utf-8"),
+make_text_and_attachments_mime_part(TextCTE, Text, MaybeAltHtml, Attachments,
+        BoundarySeed0, BoundarySeed1, Res) :-
+    generate_boundary(MixedBoundary, BoundarySeed0, BoundarySeed1Half),
+    TextPlainPart = discrete(text_plain, yes("utf-8"),
         yes(write_content_disposition(inline, no)), yes(TextCTE), text(Text)),
+    (
+        MaybeAltHtml = no,
+        TextPart = TextPlainPart,
+        BoundarySeed1 = BoundarySeed1Half
+    ;
+        MaybeAltHtml = yes(HtmlContent),
+        TextHtmlPart = discrete(text_html, yes("utf-8"),
+            yes(write_content_disposition(inline, no)), yes(TextCTE),
+            text(HtmlContent)),
+        generate_boundary(MultipartBoundary, BoundarySeed1Half, BoundarySeed1),
+        TextPart = composite(multipart_alternative,
+            boundary(MultipartBoundary),
+            yes(write_content_disposition(inline, no)), yes(cte_8bit),
+            [TextPlainPart, TextHtmlPart])
+    ),
     (
         Attachments = [],
         Res = ok(TextPart)
@@ -2250,7 +2486,7 @@ make_text_and_attachments_mime_part(TextCTE, Text, Attachments, MixedBoundary,
             AttachmentParts, [], AnyErrors),
         (
             AnyErrors = [],
-            MultiPart = composite(multipart_mixed, MixedBoundary,
+            MultiPart = composite(multipart_mixed, boundary(MixedBoundary),
                 yes(write_content_disposition(inline, no)), yes(cte_8bit),
                 [TextPart | AttachmentParts]),
             Res = ok(MultiPart)
