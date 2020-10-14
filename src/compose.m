@@ -163,6 +163,7 @@
 :- type staging_screen_action
     --->    continue
     ;       resize(message_update)
+    ;       recreate(message_update)
     ;       edit
     ;       press_key_to_delete(string)
     ;       leave(sent, message_update).
@@ -659,8 +660,8 @@ reenter_staging_screen(Config, Screen, Headers0, Text, UseAltHtmlFilter,
     MaybeAltHtml = StagingInfo ^ si_alt_html,
     AttachInfo = scrollable.init_with_cursor(Attachments),
     get_cols(Screen, Cols, !IO),
-    setup_pager_for_staging(Config, Cols, Text, MaybeAltHtml, new_pager,
-        PagerInfo, !IO),
+    setup_pager_for_staging(Config, Cols, do_not_fold, Text, MaybeAltHtml,
+        new_pager, PagerInfo, !IO),
     (
         FilterRes = no,
         update_message(Screen, clear_message, !IO)
@@ -926,12 +927,14 @@ staging_screen(Screen, MaybeKey, !.StagingInfo, !.AttachInfo, !.PagerInfo,
         toggle_alt_html(MessageUpdate0, NeedsResize, !StagingInfo, !IO),
         (
             NeedsResize = yes,
-            Action = resize(MessageUpdate0)
+            Action = recreate(MessageUpdate0)
         ;
             NeedsResize = no,
             update_message(Screen, MessageUpdate0, !IO),
             Action = continue
         )
+    ; KeyCode = char('=') ->
+        Action = recreate(clear_message)
     ;
         ( KeyCode = char('j')
         ; KeyCode = code(curs.key_down)
@@ -1025,8 +1028,8 @@ staging_screen(Screen, MaybeKey, !.StagingInfo, !.AttachInfo, !.PagerInfo,
     ; KeyCode = code(curs.key_resize) ->
         Action = resize(no_change)
     ;
-        pager_input(Screen, NumPagerRows, KeyCode, PagerAction, MessageUpdate,
-            !PagerInfo, !History, !IO),
+        pager_input(Screen, NumPagerRows, KeyCode, do_not_fold, PagerAction,
+            MessageUpdate, !PagerInfo, !History, !IO),
         update_message(Screen, MessageUpdate, !IO),
         convert_pager_action(PagerAction, Action)
     ),
@@ -1042,7 +1045,14 @@ staging_screen(Screen, MaybeKey, !.StagingInfo, !.AttachInfo, !.PagerInfo,
             !.PagerInfo, Transition, !CryptoInfo, !History, !IO)
     ;
         Action = resize(DeferredMessageUpdate),
-        resize_staging_screen(Screen, !.StagingInfo, !PagerInfo, !IO),
+        resize_staging_screen(Screen, !.StagingInfo, resize, !PagerInfo, !IO),
+        update_message(Screen, DeferredMessageUpdate, !IO),
+        staging_screen(Screen, no, !.StagingInfo, !.AttachInfo, !.PagerInfo,
+            Transition, !CryptoInfo, !History, !IO)
+    ;
+        Action = recreate(DeferredMessageUpdate),
+        resize_staging_screen(Screen, !.StagingInfo, recreate, !PagerInfo,
+            !IO),
         update_message(Screen, DeferredMessageUpdate, !IO),
         staging_screen(Screen, no, !.StagingInfo, !.AttachInfo, !.PagerInfo,
             Transition, !CryptoInfo, !History, !IO)
@@ -1078,10 +1088,11 @@ convert_pager_action(PagerAction, Action) :-
         Action = press_key_to_delete(FileName)
     ).
 
-:- pred resize_staging_screen(screen::in, staging_info::in,
+:- pred resize_staging_screen(screen::in, staging_info::in, resize_type::in,
     pager_info::in, pager_info::out, io::di, io::uo) is det.
 
-resize_staging_screen(Screen, StagingInfo, PagerInfo0, PagerInfo, !IO) :-
+resize_staging_screen(Screen, StagingInfo, PartsChanged, PagerInfo0, PagerInfo,
+        !IO) :-
     recreate_screen_for_resize(Screen, !IO),
     get_cols(Screen, Cols, !IO),
     get_main_panels(Screen, MainPanels, !IO),
@@ -1091,8 +1102,9 @@ resize_staging_screen(Screen, StagingInfo, PagerInfo0, PagerInfo, !IO) :-
     Config = StagingInfo ^ si_config,
     Text = StagingInfo ^ si_text,
     MaybeAltHtml = StagingInfo ^ si_alt_html,
-    setup_pager_for_staging(Config, Cols, Text, MaybeAltHtml,
-        retain_pager_pos(PagerInfo0, NumPagerRows), PagerInfo, !IO).
+    setup_pager_for_staging(Config, Cols, do_not_fold, Text, MaybeAltHtml,
+        retain_pager_pos(PagerInfo0, NumPagerRows, PartsChanged),
+        PagerInfo, !IO).
 
 %-----------------------------------------------------------------------------%
 
